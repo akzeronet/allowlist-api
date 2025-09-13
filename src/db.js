@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 const DB_PATH = process.env.DB_PATH || 'data/data.db';
 const db = new Database(DB_PATH, { readonly: false, fileMustExist: false });
 
-// PRAGMAs
+// PRAGMA para rendimiento/estabilidad
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('busy_timeout = 4000');
@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_username ON entries(username);
 CREATE INDEX IF NOT EXISTS idx_entries_mm_uid   ON entries(mm_uid);
 `);
 
-// Migraciones idempotentes (por si vienes de una versión anterior)
+// Migraciones (idempotentes)
 try { db.exec(`ALTER TABLE entries ADD COLUMN active INTEGER NOT NULL DEFAULT 1`); } catch {}
 try { db.exec(`ALTER TABLE entries ADD COLUMN mm_uid TEXT`); } catch {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_entries_mm_uid ON entries(mm_uid)`); } catch {}
