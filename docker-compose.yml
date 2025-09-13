@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   allowlist:
     build: .
@@ -7,7 +6,7 @@ services:
       - "8080:8080"
     environment:
       API_KEY: "mi-super-clave"
-      ENC_KEY: ""   # opcional: 64 hex chars para cifrar token (AES-256-GCM)
+      ENC_KEY: ""   # 64 hex opcional para cifrar tokens
       DB_PATH: "/app/data/data.db"
       TZ: "America/Santo_Domingo"
       NODE_ENV: "production"
