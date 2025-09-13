@@ -15,7 +15,7 @@ docker compose up --build -d
 * GET /openapi.json
 
 * POST /entries (upsert por email)
-> body: { "username": "...", "email": "...", "panelUrl": "https://my.demo...", "token": "..." }
+body: { "username": "...", "email": "...", "panelUrl": "https://my.demo...", "token": "..." }
 
 * GET /entries?email=&username=&domain=&limit=&offset=
 * GET /entries/:id
@@ -61,7 +61,5 @@ curl -s "http://localhost:8080/validate?email=root@demo.cloudron.io&username=roo
 - Rotación de ENC_KEY con doble lectura (key actual + key anterior).
 - Backups del volumen ./data.
 - Endpoint POST /bulk para alta masiva.
-
-Filtro por dominio en /validate (si quieres forzar @empresa.com).
-
-Web UI súper simple (HTML) para CRUD manual.
+- Filtro por dominio en /validate (si quieres forzar @empresa.com).
+- Web UI súper simple (HTML) para CRUD manual.
