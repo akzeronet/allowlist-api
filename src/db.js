@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS entries (
   panelUrl  TEXT NOT NULL,
   token     TEXT NOT NULL,
   active    INTEGER NOT NULL DEFAULT 1,
-  mm_uid    TEXT,
+  mm_uid    TEXT UNIQUE,
   createdAt TEXT NOT NULL DEFAULT (datetime('now')),
   updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
 );
