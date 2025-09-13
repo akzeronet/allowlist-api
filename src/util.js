@@ -6,6 +6,7 @@ export function toRow(r, decToken) {
     email: r.email,
     panelUrl: r.panelUrl,
     token,
+    active: !!r.active,   // 👈 convertir a boolean
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
