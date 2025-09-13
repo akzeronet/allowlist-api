@@ -54,7 +54,8 @@ curl -s "http://localhost:8080/validate?email=root@demo.cloudron.io&username=roo
 3. HTTP GET http://allowlist:8080/validate?email={{$json.email}}&username={{$json.username}}
    Header: X-API-Key: mi-super-clave
 4. IF {{$json.ok}} → permitido; si no, bloquea.
-> Esta ruta evita la trenza de merges y el error “Referenced node is unexecuted” que vimos en tus workflows previos.
+   
+> Esta ruta evita la trenza de merges y el error “Referenced node is unexecuted” (que se me presentaron en un workflow previos).
 
 ## 📈 Siguientes mejoras opcionales
 - Rate limiting (p. ej. express-rate-limit) si expones públicamente.
