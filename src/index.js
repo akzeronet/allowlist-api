@@ -67,14 +67,14 @@ app.get('/openapi.json', (_req, res) => res.json(openapi));
 
 // CREATE/UPSERT
 app.post('/entries', (req, res) => {
-  const { username, email, panelUrl, token } = req.body || {};
+  const { username, email, panelUrl, token, active = 1 } = req.body || {};
   const errors = validateBody({ username, email, panelUrl, token });
   if (errors.length) return res.status(400).json({ error: 'missing fields', fields: errors });
 
   const lowerEmail = normEmail(email);
   const wrapped = enc(token);
 
-  const info = insertStmt.run({ username, lowerEmail, panelUrl, token: wrapped });
+  const info = insertStmt.run({ username, lowerEmail, panelUrl, token: wrapped, active: active ? 1 : 0 });
   const row = selByEmail.get(lowerEmail);
   res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, dec) });
 });
@@ -120,6 +120,7 @@ app.put('/entries/:id', (req, res) => {
     lowerEmail: req.body.email ? normEmail(req.body.email) : null,
     panelUrl: req.body.panelUrl ?? null,
     token: req.body.token ? enc(req.body.token) : null,
+    active: typeof req.body.active === 'boolean' ? (req.body.active ? 1 : 0) : null
   };
   updateStmt.run(payload);
   const updated = selById.get(req.params.id);
