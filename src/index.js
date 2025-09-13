@@ -140,7 +140,9 @@ app.get('/validate', (req, res) => {
   if (!email) return res.status(400).json({ ok: false, reason: 'missing_email' });
 
   const row = selByEmail.get(email);
+
   if (!row) return res.json({ ok: false, reason: 'not_found' });
+  if (!row.active) return res.json({ ok: false, reason: 'inactive' }); // 👈 aquí va la validación
 
   if (username && username.toLowerCase() !== row.username.toLowerCase())
     return res.json({ ok: false, reason: 'username_mismatch' });
