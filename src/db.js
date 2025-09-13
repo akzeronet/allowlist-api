@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS entries (
   email     TEXT NOT NULL UNIQUE,
   panelUrl  TEXT NOT NULL,
   token     TEXT NOT NULL, -- puede ir cifrado
+  active    INTEGER NOT NULL DEFAULT 1, -- 👈 nuevo campo
   createdAt TEXT NOT NULL DEFAULT (datetime('now')),
   updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
 );
