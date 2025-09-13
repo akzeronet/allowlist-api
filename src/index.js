@@ -34,24 +34,30 @@ const dec = (wrapped) => (ENC_KEY ? maybeDecrypt(wrapped, ENC_KEY) : wrapped);
 // prepared statements
 const selByEmail = db.prepare('SELECT * FROM entries WHERE lower(email)=lower(?)');
 const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
+const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
+const selByUid   = db.prepare('SELECT * FROM entries WHERE mm_uid=?');
 
 const insertStmt = db.prepare(`
-  INSERT INTO entries (username, email, panelUrl, token)
-  VALUES (@username, @lowerEmail, @panelUrl, @token)
+  INSERT INTO entries (username, email, panelUrl, token, active, mm_uid)
+  VALUES (@username, @lowerEmail, @panelUrl, @token, @active, @mm_uid)
   ON CONFLICT(email) DO UPDATE SET
     username=excluded.username,
     panelUrl=excluded.panelUrl,
     token=excluded.token,
+    active=excluded.active,
+    mm_uid=COALESCE(excluded.mm_uid, entries.mm_uid),
     updatedAt=datetime('now')
 `);
 
 const updateStmt = db.prepare(`
   UPDATE entries
-     SET username=COALESCE(@username, username),
-         email=COALESCE(@lowerEmail, email),
-         panelUrl=COALESCE(@panelUrl, panelUrl),
-         token=COALESCE(@token, token),
-         updatedAt=datetime('now')
+     SET username = COALESCE(@username, username),
+         email    = COALESCE(@lowerEmail, email),
+         panelUrl = COALESCE(@panelUrl, panelUrl),
+         token    = COALESCE(@token, token),
+         active   = COALESCE(@active, active),
+         mm_uid   = COALESCE(@mm_uid, mm_uid),
+         updatedAt = datetime('now')
    WHERE id=@id
 `);
 
@@ -67,16 +73,29 @@ app.get('/openapi.json', (_req, res) => res.json(openapi));
 
 // CREATE/UPSERT
 app.post('/entries', (req, res) => {
-  const { username, email, panelUrl, token, active = 1 } = req.body || {};
+  // ignora cualquier id suministrado
+  const { id, ...raw } = req.body || {};
+  const body = sanitizeEntryPayload(raw);
+
+  const { username, email, panelUrl, token } = body;
   const errors = validateBody({ username, email, panelUrl, token });
   if (errors.length) return res.status(400).json({ error: 'missing fields', fields: errors });
 
   const lowerEmail = normEmail(email);
   const wrapped = enc(token);
 
-  const info = insertStmt.run({ username, lowerEmail, panelUrl, token: wrapped, active: active ? 1 : 0 });
+  const payload = {
+    username,
+    lowerEmail,
+    panelUrl,
+    token: wrapped,
+    active: body.active ? 1 : 0,
+    mm_uid: body.mm_uid ?? null,  // 👈 opcional
+  };
+
+  const info = insertStmt.run(payload);
   const row = selByEmail.get(lowerEmail);
-  res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, dec) });
+  return res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, dec) });
 });
 
 // LIST (con filtros + paginación)
@@ -114,14 +133,17 @@ app.put('/entries/:id', (req, res) => {
   const row = selById.get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not_found' });
 
+  const body = sanitizeEntryPayload(req.body);
   const payload = {
     id: req.params.id,
-    username: req.body.username ?? null,
-    lowerEmail: req.body.email ? normEmail(req.body.email) : null,
-    panelUrl: req.body.panelUrl ?? null,
-    token: req.body.token ? enc(req.body.token) : null,
-    active: typeof req.body.active === 'boolean' ? (req.body.active ? 1 : 0) : null
+    username: body.username ?? null,
+    lowerEmail: body.email ? normEmail(body.email) : null,
+    panelUrl: body.panelUrl ?? null,
+    token: body.token ? enc(body.token) : null,
+    active: typeof body.active === 'boolean' ? (body.active ? 1 : 0) : null,
+    mm_uid: body.mm_uid ?? null,  // 👈 se puede cambiar
   };
+
   updateStmt.run(payload);
   const updated = selById.get(req.params.id);
   res.json({ updated: true, entry: toRow(updated, dec) });
@@ -137,17 +159,40 @@ app.delete('/entries/:id', (req, res) => {
 app.get('/validate', (req, res) => {
   const email = normEmail(req.query.email);
   const username = (req.query.username || '').trim();
-  if (!email) return res.status(400).json({ ok: false, reason: 'missing_email' });
+  const mm_uid = (req.query.mm_uid || '').trim();
 
-  const row = selByEmail.get(email);
+  let row = null;
+
+  if (mm_uid) row = selByUid.get(mm_uid);
+  else if (email) row = selByEmail.get(email);
+  else if (username) row = selByUser.get(username);
 
   if (!row) return res.json({ ok: false, reason: 'not_found' });
-  if (!row.active) return res.json({ ok: false, reason: 'inactive' }); //👈 aquí va la validación
+  if (!row.active) return res.json({ ok: false, reason: 'inactive' });
 
-  if (username && username.toLowerCase() !== row.username.toLowerCase())
+  if (email && row.email.toLowerCase() !== email)
+    return res.json({ ok: false, reason: 'email_mismatch' });
+
+  if (username && row.username.toLowerCase() !== username.toLowerCase())
     return res.json({ ok: false, reason: 'username_mismatch' });
 
   res.json({ ok: true, match: toRow(row, dec) });
+});
+
+app.get('/entries/lookup', (req, res) => {
+  const id = req.query.id ? Number(req.query.id) : null;
+  const email = normEmail(req.query.email);
+  const username = (req.query.username || '').trim();
+  const mm_uid = (req.query.mm_uid || '').trim();
+
+  let row = null;
+  if (id) row = selById.get(id);
+  else if (mm_uid) row = selByUid.get(mm_uid);
+  else if (email) row = selByEmail.get(email);
+  else if (username) row = selByUser.get(username);
+
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  res.json({ entry: toRow(row, dec) });
 });
 
 app.listen(PORT, () => {
