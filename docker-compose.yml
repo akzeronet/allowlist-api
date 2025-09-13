@@ -5,17 +5,20 @@ services:
     ports:
       - "8080:8080"
     environment:
-      API_KEY: "mi-super-clave"
-      ENC_KEY: ""   # 64 hex opcional para cifrar tokens
+      # 🔐 seguridad
+      API_KEY: "pon-aqui-una-clave-larga-y-aleatoria"
+      API_KEY_OLD: ""       # opcional (rotación)
+      ENC_KEY: ""           # openssl rand -hex 32  (ACTIVA cifrado)
+      ENC_KEY_OLD: ""       # opcional (rotación de cifrado)
+      # 🌐 CORS: separa por comas si quieres restringir (https://tu-n8n.com,https://otro.origen.com)
+      CORS_ORIGINS: ""
+      # 🛃 Validación por dominio (opcional), ej: empresa.com
+      VALIDATE_DOMAIN: ""
+      # 🕒
       DB_PATH: "/app/data/data.db"
       TZ: "America/Santo_Domingo"
-      NODE_ENV: "production"
+      # Modo: 1=production, 2=development (o usa NODE_ENV directo si prefieres)
+      APP_MODE: "1"
     volumes:
       - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 15s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped
