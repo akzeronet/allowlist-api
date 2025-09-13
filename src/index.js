@@ -3,35 +3,85 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
 import db from './db.js';
-import { maybeEncrypt, maybeDecrypt } from './crypto.js';
+import { encryptWithKey, decryptWithKeys } from './crypto.js';
 import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
-import { openapi } from './openapi.js';
 
+// ====== Modo / entorno ======
+const APP_MODE = process.env.APP_MODE || ''; // "1" prod, "2" dev (opcional)
+if (APP_MODE === '1') process.env.NODE_ENV = 'production';
+if (APP_MODE === '2') process.env.NODE_ENV = 'development';
+
+// ====== Config ======
 const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'change-me';
-const ENC_KEY = process.env.ENC_KEY || ''; // hex de 32 bytes opcional
+const API_KEY_OLD = process.env.API_KEY_OLD || '';
+const ENC_KEY = process.env.ENC_KEY || '';            // clave actual (hex 64)
+const ENC_KEY_OLD = process.env.ENC_KEY_OLD || '';    // clave anterior (hex 64) para rotación
+const VALIDATE_DOMAIN = (process.env.VALIDATE_DOMAIN || '').toLowerCase().trim(); // ej. "empresa.com"
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
-// middlewares
+// ====== Middlewares base ======
 app.use(helmet());
-app.use(cors({ origin: '*', maxAge: 600 }));
+
+// CORS estricto (si no configuras, permite todo como antes)
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS blocked'));
+  },
+  maxAge: 600,
+}));
+
 app.use(express.json({ limit: '256kb' }));
 app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'tiny'));
 
-// auth simple por API key
+// Rate limit global (60s ventana / 120 reqs)
+const limiter = rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
+
+// Request-id + latencia simple (logs)
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/openapi.json') return next();
-  const key = req.header('X-API-Key');
-  if (key !== API_KEY) return res.status(401).json({ error: 'unauthorized' });
+  const rid = Math.random().toString(36).slice(2, 10);
+  const start = Date.now();
+  res.setHeader('X-Request-Id', rid);
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`[${rid}] ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${ms}ms`);
+  });
   next();
 });
 
-// helpers token crypto
-const enc = (plain) => maybeEncrypt(plain, ENC_KEY).value;
-const dec = (wrapped) => (ENC_KEY ? maybeDecrypt(wrapped, ENC_KEY) : wrapped);
+// Timeout por respuesta (12s)
+app.use((req, res, next) => {
+  res.setTimeout(12_000, () => {
+    if (!res.headersSent) res.status(504).json({ error: 'timeout' });
+    try { res.end(); } catch {}
+  });
+  next();
+});
 
-// prepared statements
+// Auth por API key + rotación (salta health y openapi)
+app.use((req, res, next) => {
+  if (req.path === '/health' || req.path === '/openapi.json') return next();
+  const k = req.header('X-API-Key') || '';
+  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
+  return res.status(401).json({ error: 'unauthorized' });
+});
+
+// ====== Helpers cifrado ======
+const encToken = (plain) => encryptWithKey(plain, ENC_KEY).value;
+const decToken = (wrapped) => (wrapped == null ? null : decryptWithKeys(wrapped, ENC_KEY, ENC_KEY_OLD));
+
+// ====== Statements ======
 const selByEmail = db.prepare('SELECT * FROM entries WHERE lower(email)=lower(?)');
 const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
 const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
@@ -41,12 +91,12 @@ const insertStmt = db.prepare(`
   INSERT INTO entries (username, email, panelUrl, token, active, mm_uid)
   VALUES (@username, @lowerEmail, @panelUrl, @token, @active, @mm_uid)
   ON CONFLICT(email) DO UPDATE SET
-    username=excluded.username,
-    panelUrl=excluded.panelUrl,
-    token=excluded.token,
-    active=excluded.active,
-    mm_uid=COALESCE(excluded.mm_uid, entries.mm_uid),
-    updatedAt=datetime('now')
+    username = excluded.username,
+    panelUrl = excluded.panelUrl,
+    token    = excluded.token,
+    active   = excluded.active,
+    mm_uid   = COALESCE(excluded.mm_uid, entries.mm_uid),
+    updatedAt = datetime('now')
 `);
 
 const updateStmt = db.prepare(`
@@ -61,124 +111,95 @@ const updateStmt = db.prepare(`
    WHERE id=@id
 `);
 
-const listBase = `
-  SELECT * FROM entries
-`;
-const countBase = `SELECT count(*) as n FROM entries`;
-
-// routes
+// ====== Rutas ======
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-app.get('/openapi.json', (_req, res) => res.json(openapi));
+app.get('/openapi.json', (_req, res) => {
+  // respuesta mínima; mantén tu openapi real si ya lo tenías
+  res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
+});
 
-// CREATE/UPSERT
+// Crear/Upsert (ignora cualquier id; permite mm_uid)
 app.post('/entries', (req, res) => {
-  // ignora cualquier id suministrado
   const { id, ...raw } = req.body || {};
   const body = sanitizeEntryPayload(raw);
-
   const { username, email, panelUrl, token } = body;
   const errors = validateBody({ username, email, panelUrl, token });
   if (errors.length) return res.status(400).json({ error: 'missing fields', fields: errors });
 
   const lowerEmail = normEmail(email);
-  const wrapped = enc(token);
-
   const payload = {
     username,
     lowerEmail,
     panelUrl,
-    token: wrapped,
+    token: encToken(token),
     active: body.active ? 1 : 0,
-    mm_uid: body.mm_uid ?? null,  // 👈 opcional
+    mm_uid: body.mm_uid ?? null,
   };
 
   const info = insertStmt.run(payload);
   const row = selByEmail.get(lowerEmail);
-  return res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, dec) });
+  res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, decToken) });
 });
 
-// LIST (con filtros + paginación)
+// Alta masiva (/entries/bulk) — upsert por email
+app.post('/entries/bulk', (req, res) => {
+  const list = Array.isArray(req.body) ? req.body : [];
+  if (!list.length) return res.status(400).json({ error: 'empty_array' });
+
+  const tx = db.transaction((rows) => {
+    let created = 0, updated = 0, errors = 0;
+    for (const raw of rows) {
+      try {
+        const b = sanitizeEntryPayload(raw);
+        const missing = validateBody(b);
+        if (missing.length) { errors++; continue; }
+        const lowerEmail = normEmail(b.email);
+        const payload = {
+          username: b.username,
+          lowerEmail,
+          panelUrl: b.panelUrl,
+          token: encToken(b.token),
+          active: b.active ? 1 : 0,
+          mm_uid: b.mm_uid ?? null,
+        };
+        const before = selByEmail.get(lowerEmail);
+        insertStmt.run(payload);
+        const after = selByEmail.get(lowerEmail);
+        if (before) updated++; else created++;
+      } catch {
+        errors++;
+      }
+    }
+    return { created, updated, errors, total: rows.length };
+  });
+
+  const result = tx(list);
+  res.status(207).json({ status: 'multi', ...result });
+});
+
+// Listar con filtros/paginación
 app.get('/entries', (req, res) => {
   const { email, username, domain } = req.query;
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
   const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
-
   const where = [];
   const params = {};
 
-  if (email) { where.push('lower(email)=lower(@email)'); params.email = String(email); }
+  if (email)    { where.push('lower(email)=lower(@email)'); params.email = String(email); }
   if (username) { where.push('lower(username)=lower(@username)'); params.username = String(username); }
-  if (domain) { where.push("instr(lower(email), lower(@atDomain))>0"); params.atDomain = '@' + String(domain).toLowerCase(); }
+  if (domain)   { where.push("instr(lower(email), lower(@atDomain))>0"); params.atDomain = '@' + String(domain).toLowerCase(); }
 
   const whereSql = where.length ? (' WHERE ' + where.join(' AND ')) : '';
-  const rows = db.prepare(`${listBase}${whereSql} ORDER BY createdAt DESC LIMIT @limit OFFSET @offset`)
+  const rows = db.prepare(`SELECT * FROM entries${whereSql} ORDER BY createdAt DESC LIMIT @limit OFFSET @offset`)
                  .all({ ...params, limit, offset });
-  const count = db.prepare(`${countBase}${whereSql}`).get(params).n;
+  const count = db.prepare(`SELECT count(*) as n FROM entries${whereSql}`).get(params).n;
 
-  // hint de caché corto para GET
   res.set('Cache-Control', 'public, max-age=30');
-  res.json({ total: count, entries: rows.map(r => toRow(r, dec)) });
+  res.json({ total: count, entries: rows.map(r => toRow(r, decToken)) });
 });
 
-// READ
-app.get('/entries/:id', (req, res) => {
-  const row = selById.get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'not_found' });
-  res.json({ entry: toRow(row, dec) });
-});
-
-// UPDATE
-app.put('/entries/:id', (req, res) => {
-  const row = selById.get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'not_found' });
-
-  const body = sanitizeEntryPayload(req.body);
-  const payload = {
-    id: req.params.id,
-    username: body.username ?? null,
-    lowerEmail: body.email ? normEmail(body.email) : null,
-    panelUrl: body.panelUrl ?? null,
-    token: body.token ? enc(body.token) : null,
-    active: typeof body.active === 'boolean' ? (body.active ? 1 : 0) : null,
-    mm_uid: body.mm_uid ?? null,  // 👈 se puede cambiar
-  };
-
-  updateStmt.run(payload);
-  const updated = selById.get(req.params.id);
-  res.json({ updated: true, entry: toRow(updated, dec) });
-});
-
-// DELETE
-app.delete('/entries/:id', (req, res) => {
-  const info = db.prepare('DELETE FROM entries WHERE id=?').run(req.params.id);
-  res.json({ deleted: info.changes > 0 });
-});
-
-// VALIDATE
-app.get('/validate', (req, res) => {
-  const email = normEmail(req.query.email);
-  const username = (req.query.username || '').trim();
-  const mm_uid = (req.query.mm_uid || '').trim();
-
-  let row = null;
-
-  if (mm_uid) row = selByUid.get(mm_uid);
-  else if (email) row = selByEmail.get(email);
-  else if (username) row = selByUser.get(username);
-
-  if (!row) return res.json({ ok: false, reason: 'not_found' });
-  if (!row.active) return res.json({ ok: false, reason: 'inactive' });
-
-  if (email && row.email.toLowerCase() !== email)
-    return res.json({ ok: false, reason: 'email_mismatch' });
-
-  if (username && row.username.toLowerCase() !== username.toLowerCase())
-    return res.json({ ok: false, reason: 'username_mismatch' });
-
-  res.json({ ok: true, match: toRow(row, dec) });
-});
-
+// Lookup one (id | email | username | mm_uid)
 app.get('/entries/lookup', (req, res) => {
   const id = req.query.id ? Number(req.query.id) : null;
   const email = normEmail(req.query.email);
@@ -192,7 +213,83 @@ app.get('/entries/lookup', (req, res) => {
   else if (username) row = selByUser.get(username);
 
   if (!row) return res.status(404).json({ error: 'not_found' });
-  res.json({ entry: toRow(row, dec) });
+  res.json({ entry: toRow(row, decToken) });
+});
+
+// Read/Update/Delete por id
+app.get('/entries/:id', (req, res) => {
+  const row = selById.get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  res.json({ entry: toRow(row, decToken) });
+});
+
+app.put('/entries/:id', (req, res) => {
+  const row = selById.get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not_found' });
+
+  const b = sanitizeEntryPayload(req.body);
+  const payload = {
+    id: req.params.id,
+    username: b.username ?? null,
+    lowerEmail: b.email ? normEmail(b.email) : null,
+    panelUrl: b.panelUrl ?? null,
+    token: b.token ? encToken(b.token) : null,
+    active: typeof b.active === 'boolean' ? (b.active ? 1 : 0) : null,
+    mm_uid: b.mm_uid ?? null,
+  };
+  updateStmt.run(payload);
+  const updated = selById.get(req.params.id);
+  res.json({ updated: true, entry: toRow(updated, decToken) });
+});
+
+app.delete('/entries/:id', (req, res) => {
+  const info = db.prepare('DELETE FROM entries WHERE id=?').run(req.params.id);
+  res.json({ deleted: info.changes > 0 });
+});
+
+// VALIDATE con dominio opcional (y soporte mm_uid)
+app.get('/validate', (req, res) => {
+  const email = normEmail(req.query.email);
+  const username = (req.query.username || '').trim();
+  const mm_uid = (req.query.mm_uid || '').trim();
+
+  let row = null;
+  if (mm_uid)      row = selByUid.get(mm_uid);
+  else if (email)  row = selByEmail.get(email);
+  else if (username) row = selByUser.get(username);
+
+  if (!row) return res.json({ ok: false, reason: 'not_found' });
+  if (!row.active) return res.json({ ok: false, reason: 'inactive' });
+
+  if (email && row.email.toLowerCase() !== email)
+    return res.json({ ok: false, reason: 'email_mismatch' });
+
+  if (username && row.username.toLowerCase() !== username.toLowerCase())
+    return res.json({ ok: false, reason: 'username_mismatch' });
+
+  if (VALIDATE_DOMAIN) {
+    const dom = row.email.split('@')[1]?.toLowerCase() || '';
+    if (dom !== VALIDATE_DOMAIN) {
+      return res.json({ ok: false, reason: 'domain_forbidden', expected: VALIDATE_DOMAIN, got: dom });
+    }
+  }
+
+  res.json({ ok: true, match: toRow(row, decToken) });
+});
+
+// Diagnóstico
+app.get('/ping', (_req, res) => res.json({ pong: true, ts: Date.now() }));
+app.get('/sleep', async (req, res) => {
+  const ms = Math.min(parseInt(req.query.ms || '5000', 10), 30000);
+  await new Promise(r => setTimeout(r, ms));
+  res.json({ slept: ms });
+});
+
+// Errors -> JSON
+app.use((err, req, res, _next) => {
+  console.error('Unhandled error:', err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'internal_error' });
 });
 
 app.listen(PORT, () => {
