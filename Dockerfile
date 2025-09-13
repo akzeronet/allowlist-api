@@ -1,12 +1,16 @@
 FROM node:20-alpine
 WORKDIR /app
 
-# Dependencias del sistema (opcional, por si compilas algo en el futuro)
+# utilería mínima
 RUN apk add --no-cache tini
 
-COPY package.json ./
-RUN npm ci --omit=dev
+# copia package.json y (si existiera) package-lock.json
+COPY package*.json ./
 
+# ✔ instala dependencias de producción sin requerir lockfile preexistente
+RUN npm install --omit=dev --no-audit --no-fund
+
+# copia el código
 COPY src ./src
 
 # volumen para la base de datos
