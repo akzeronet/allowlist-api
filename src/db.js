@@ -17,13 +17,15 @@ CREATE TABLE IF NOT EXISTS entries (
   username  TEXT NOT NULL,
   email     TEXT NOT NULL UNIQUE,
   panelUrl  TEXT NOT NULL,
-  token     TEXT NOT NULL, -- puede ir cifrado
-  active    INTEGER NOT NULL DEFAULT 1, -- 👈 nuevo campo
+  token     TEXT NOT NULL,
+  active    INTEGER NOT NULL DEFAULT 1,
+  mm_uid    TEXT, UNIQUE,  -- 👈 nuevo (opcional, único no se debe multi-instancias)
   createdAt TEXT NOT NULL DEFAULT (datetime('now')),
   updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_entries_username ON entries(username);
 CREATE INDEX IF NOT EXISTS idx_entries_domain   ON entries(substr(email, instr(email, '@') + 1));
+CREATE INDEX IF NOT EXISTS idx_entries_mm_uid   ON entries(mm_uid);
 `);
 
 export default db;
