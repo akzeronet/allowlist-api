@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import db from './db.js';
 import { maybeEncrypt, maybeDecrypt } from './crypto.js';
-import { toRow, normEmail, validateBody } from './util.js';
+import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
 import { openapi } from './openapi.js';
 
 const app = express();
