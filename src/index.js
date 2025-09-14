@@ -64,7 +64,12 @@ app.use(cors({
   maxAge: 600,
 }));
 
-app.use(express.json({ limit: '256kb' }));
+// app.use(express.json({ limit: '256kb' }));
+app.use(express.json({
+  limit: '256kb',
+  verify: (req, _res, buf) => { req.rawBody = buf; } // crudo disponible para HMAC si lo activas
+}));
+
 app.use(morgan(IS_DEV ? 'dev' : 'tiny'));
 
 app.use(rateLimit({
@@ -161,7 +166,10 @@ function verifyHmac(req) {
   if (Math.abs(now - Number(ts)) > 300) return false; // 5 min ventana
 
   const body = req.rawBody || JSON.stringify(req.body || '');
-  const bodyHash = crypto.createHash('sha256').update(body || '').digest('hex');
+//  const bodyHash = crypto.createHash('sha256').update(body || '').digest('hex');
+  const bodyHash = crypto.createHash('sha256')
+  .update(req.rawBody ? req.rawBody : Buffer.from(''))
+  .digest('hex');
   const base = `${req.method}\n${req.originalUrl}\n${ts}\n${bodyHash}`;
   const expect = crypto.createHmac('sha256', HMAC_SECRET).update(base).digest('hex');
   return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
