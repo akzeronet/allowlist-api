@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Allowlist API
-  version: "1.2.1"
+  version: "1.2.2"
 
 servers:
   - url: /
@@ -15,6 +15,7 @@ tags:
   - name: system
   - name: entries
   - name: validate
+  - name: keys
 
 security:
   - ApiKeyAuth: []
@@ -26,8 +27,7 @@ paths:
       summary: Health check
       tags: [system]
       responses:
-        "200":
-          description: OK
+        "200": { description: OK }
 
   /entries:
     get:
@@ -177,16 +177,121 @@ paths:
       responses:
         "200": { description: OK }
 
+  /keys:
+    post:
+      summary: Create API key (admin)
+      description: Crea una clave con *scopes* y devuelve el **token** `kid.secret` (solo se muestra una vez).
+      tags: [keys]
+      security:
+        - ApiKeyAuth: []   # API_KEY global o multi-key con scope admin, o HMAC
+        - HmacAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:   { type: string, example: "n8n-writer" }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [read, write, delete, admin] }
+                  example: [read, write]
+                active: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: boolean }
+                  key:
+                    type: object
+                    properties:
+                      id:     { type: integer }
+                      name:   { type: string }
+                      kid:    { type: string }
+                      scopes:
+                        type: array
+                        items: { type: string }
+                      active: { type: boolean }
+                  token:
+                    type: string
+                    description: "Formato: kid.secret (guárdalo ahora; no se vuelve a mostrar)."
+
+    get:
+      summary: List API keys (admin)
+      tags: [keys]
+      security:
+        - ApiKeyAuth: []
+        - HmacAuth: []
+      responses:
+        "200":
+          description: OK
+
+  /keys/{id}:
+    put:
+      summary: Update API key (admin)
+      tags: [keys]
+      security:
+        - ApiKeyAuth: []
+        - HmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:   { type: string }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [read, write, delete, admin] }
+                active: { type: boolean }
+      responses:
+        "200": { description: Updated }
+
+    delete:
+      summary: Delete API key (admin)
+      tags: [keys]
+      security:
+        - ApiKeyAuth: []
+        - HmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: Deleted }
+
 components:
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
       in: header
       name: X-API-Key
+      description: |
+        - **Global:** `X-API-Key: <API_KEY>`
+        - **Multi-key (scopes):** `X-API-Key: <kid>.<secret>`
+        - **Old:** `X-API-Key: <API_KEY_OLD>` (rotación)
+        Scopes: `read`, `write`, `delete`, `admin`.
+
     HmacAuth:
       type: apiKey
       in: header
       name: X-Signature
+      description: |
+        Firma HMAC opcional (si `HMAC_SECRET` está definido).
+        Requiere también `X-Timestamp` (epoch s/ms) y `X-Content-Hash` (sha256 del body en hex).
+        Base: `${method}\n${path}\n${timestamp}\n${bodyHash}`
 
   parameters:
     XTimestamp:
@@ -208,7 +313,7 @@ components:
         username:  { type: string }
         email:     { type: string, format: email }
         panelUrl:  { type: string, format: uri }
-        token:     { type: string }
+        token:     { type: string, description: "Devuelto en claro; en BD cifrado si ENC_KEY está definida" }
         active:    { type: boolean }
         mm_uid:    { type: string, nullable: true }
         createdAt: { type: string }
