@@ -91,7 +91,7 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-  res.setTimeout(12_000, () => {
+  res.setTimeout(20000, () => {
     if (!res.headersSent) res.status(504).json({ error: 'timeout' });
     try { res.end(); } catch {}
   });
@@ -176,11 +176,11 @@ function verifyHmac(req) {
 }
 
 // Guarda raw body para hash exacto
-app.use((req, res, next) => {
-  let data = '';
-  req.on('data', (c) => { data += c; });
-  req.on('end', () => { req.rawBody = data; next(); });
-});
+// app.use((req, res, next) => {
+//  let data = '';
+//  req.on('data', (c) => { data += c; });
+//  req.on('end', () => { req.rawBody = data; next(); });
+// });
 
 // Auth combinada: API key o HMAC
 const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
