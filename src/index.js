@@ -84,19 +84,28 @@ app.use((req, res, next) => {
 // });
 
 // Auth por API key + rotación (salta health, openapi y docs/redoc)
+// app.use((req, res, next) => {
+//  const p = req.path || '';
+//  const isPublic =
+//    p === '/health' ||
+//    p === '/openapi.json' ||
+//    p === '/redoc' ||
+//    p.startsWith('/docs'); // incluye /docs y todos sus assets (css/js)
+
+//  if (isPublic) return next();
+
+//  const k = req.header('X-API-Key') || '';
+//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
+//  return res.status(401).json({ error: 'unauthorized' });
+//});
+
+// Auth por API key + rotación (salta health, openapi y docs/redoc + assets)
+const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
 app.use((req, res, next) => {
-  const p = req.path || '';
-  const isPublic =
-    p === '/health' ||
-    p === '/openapi.json' ||
-    p === '/redoc' ||
-    p.startsWith('/docs'); // incluye /docs y todos sus assets (css/js)
-
-  if (isPublic) return next();
-
+  if (PUBLIC_RE.test(req.path || '')) return next();
   const k = req.header('X-API-Key') || '';
   if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
-  return res.status(401).json({ error: 'unauthorized' });
+  res.status(401).json({ error: 'unauthorized' });
 });
 
 // ====== Helpers cifrado ======
@@ -154,39 +163,72 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Carga openapi.yaml una vez al arrancar
-const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
-const openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
+// const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
+// const openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
 
-// Sirve JSON para integraciones
-app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
+// Carga OpenAPI YAML (si falta, no rompas)
+let openapiDoc = null;
+try {
+  const openapiPath = path.join(__dirname, '..', 'openapi.yaml'); // asegúrate de COPY en Dockerfile
+  openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
+} catch (e) {
+  console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
+}
 
-// Sirve Swagger UI en /docs
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiDoc, {
-  explorer: true,
-  swaggerOptions: {
-    persistAuthorization: true
-  }
-}));
+// Helmet relajado solo para documentación (evita bloqueos de scripts/recursos)
+const helmetDocs = helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+});
 
-app.get('/redoc', (_req, res) => {
+// /openapi.json (si hay spec real)
+if (openapiDoc) {
+  app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
+  // Swagger UI en /docs
+  app.use('/docs', helmetDocs, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+    explorer: true,
+    swaggerOptions: { persistAuthorization: true },
+  }));
+} else {
+  // Fallback mínimo para no dejar en blanco
+  app.get('/openapi.json', (_req, res) => {
+    res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } });
+  });
+}
+
+// Redoc en /redoc (usa CDN → necesita helmet relajado)
+app.get('/redoc', helmetDocs, (_req, res) => {
   const url = '/openapi.json';
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`
-<!DOCTYPE html>
+  res.end(`<!DOCTYPE html>
 <html>
 <head>
   <title>Allowlist API - Redoc</title>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>body { margin: 0; padding: 0; }</style>
+  <style>body{margin:0;padding:0}</style>
 </head>
 <body>
   <redoc spec-url="${url}"></redoc>
   <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
 </body>
-</html>
-  `);
+</html>`);
 });
+
+
+// Sirve JSON para integraciones
+//app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
+
+// Sirve Swagger UI en /docs
+// app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+//  explorer: true,
+//  swaggerOptions: {
+ //   persistAuthorization: true
+//  }
+//}));
+
 
 // CREATE (create-only). Si hay duplicado -> 409
 app.post('/entries', (req, res) => {
