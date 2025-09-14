@@ -4,22 +4,23 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
-import db from './db.js';
-import { encryptWithKey, decryptWithKeys } from './crypto.js';
-import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import YAML from 'yaml';
 import swaggerUi from 'swagger-ui-express';
 
-// ====== Modo / entorno ======
+import db from './db.js';
+import { encryptWithKey, decryptWithKeys } from './crypto.js';
+import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
+
+// ===== Modo/entorno
 const APP_MODE = process.env.APP_MODE || ''; // "1" prod, "2" dev
 if (APP_MODE === '1') process.env.NODE_ENV = 'production';
 if (APP_MODE === '2') process.env.NODE_ENV = 'development';
 const IS_DEV = process.env.NODE_ENV === 'development';
 
-// ====== Config ======
+// ===== Config
 const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'change-me';
@@ -29,11 +30,11 @@ const ENC_KEY_OLD = process.env.ENC_KEY_OLD || '';
 const VALIDATE_DOMAIN = (process.env.VALIDATE_DOMAIN || '').toLowerCase().trim();
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// Docs config
+// Docs
 const DOCS_ENABLED = String(process.env.DOCS_ENABLED ?? 'true').toLowerCase() === 'true';
 const DOCS_RELAX = String(process.env.DOCS_RELAX ?? (IS_DEV ? 'true' : 'false')).toLowerCase() === 'true';
 
-// Paths y carga de OpenAPI
+// Paths / OpenAPI
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -47,9 +48,7 @@ try {
   console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
 }
 
-// ====== Middlewares base ======
-
-// Helmet global (excluye docs/openapi si vamos a relajarlos)
+// ===== Middlewares base
 const DOCS_RE = /^\/(?:docs(?:\/.*)?|redoc|openapi\.json)$/;
 const helmetBase = helmet();
 app.use((req, res, next) => {
@@ -57,7 +56,6 @@ app.use((req, res, next) => {
   return helmetBase(req, res, next);
 });
 
-// CORS estricto
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
@@ -69,7 +67,6 @@ app.use(cors({
 app.use(express.json({ limit: '256kb' }));
 app.use(morgan(IS_DEV ? 'dev' : 'tiny'));
 
-// Rate limit global
 app.use(rateLimit({
   windowMs: 60_000,
   max: 120,
@@ -77,7 +74,6 @@ app.use(rateLimit({
   legacyHeaders: false,
 }));
 
-// Request-id + latencia simple
 app.use((req, res, next) => {
   const rid = Math.random().toString(36).slice(2, 10);
   const start = Date.now();
@@ -89,7 +85,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Timeout por respuesta
 app.use((req, res, next) => {
   res.setTimeout(12_000, () => {
     if (!res.headersSent) res.status(504).json({ error: 'timeout' });
@@ -98,19 +93,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Static assets (sirve /public bajo /assets)
-import path from 'path';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+// Static /assets (para redoc offline)
 app.use('/assets', express.static(
   path.join(__dirname, '..', 'public'),
   { etag: true, maxAge: IS_DEV ? 0 : '7d' }
 ));
 
-// ====== Docs (Swagger/Redoc) y OpenAPI ======
-
+// ===== Docs (Swagger/Redoc)
 const relaxDocsHeaders = (req, res, next) => {
   const isRedoc = req.path === '/redoc';
   const csp = [
@@ -120,10 +109,9 @@ const relaxDocsHeaders = (req, res, next) => {
     "img-src 'self' data:",
     "font-src 'self' https: data:",
     "style-src 'self' https: 'unsafe-inline'",
-    // 👇 Con Redoc offline, basta 'self'
     isRedoc
       ? "script-src 'self' 'unsafe-inline'"
-      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Swagger UI necesita eval
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   ].join('; ');
   res.setHeader('Content-Security-Policy', csp);
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
@@ -145,25 +133,22 @@ if (DOCS_ENABLED) {
       res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } })
     );
   }
-  app.get('/redoc', ...(DOCS_RELAX ? [relaxDocsHeaders] : []), (_req, res) => {
-  const url = '/openapi.json';
-  const localJs = '/assets/redoc/redoc.standalone.js'; // ← servido desde /public
-  res.type('html').send(`<!doctype html>
+  app.get('/redoc', ...docsMw, (_req, res) => {
+    const url = '/openapi.json';
+    const localJs = '/assets/redoc/redoc.standalone.js';
+    res.type('html').send(`<!doctype html>
 <html>
-<head>
-  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Allowlist API - Redoc</title>
-  <style>html,body{height:100%;margin:0}</style>
-</head>
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
 <body>
   <redoc spec-url="${url}"></redoc>
   <script src="${localJs}"></script>
 </body>
 </html>`);
-});
+  });
 }
 
-// ====== Auth por API key (público: health, openapi, docs, redoc, favicon) ======
+// ===== Auth por API key (public: health, docs, redoc, openapi, favicon)
 const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
 app.use((req, res, next) => {
   if (PUBLIC_RE.test(req.path || '')) return next();
@@ -172,11 +157,11 @@ app.use((req, res, next) => {
   res.status(401).json({ error: 'unauthorized' });
 });
 
-// ====== Helpers cifrado ======
+// ===== Cifrado helpers
 const encToken = (plain) => encryptWithKey(plain, ENC_KEY).value;
 const decToken = (wrapped) => (wrapped == null ? null : decryptWithKeys(wrapped, ENC_KEY, ENC_KEY_OLD));
 
-// ====== Statements ======
+// ===== Statements
 const selByEmail = db.prepare('SELECT * FROM entries WHERE lower(email)=lower(?)');
 const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
 const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
@@ -210,11 +195,10 @@ function conflictFromSqliteError(e) {
   return { status: 409, body: { error: 'conflict', fields: [...new Set(fields)] } };
 }
 
-// ====== Rutas ======
+// ===== Rutas
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
-// CREATE (create-only). Si hay duplicado -> 409
 app.post('/entries', (req, res) => {
   const { id, ...raw } = req.body || {};
   const b = sanitizeEntryPayload(raw);
@@ -243,7 +227,6 @@ app.post('/entries', (req, res) => {
   }
 });
 
-// BULK create-only
 app.post('/entries/bulk', (req, res) => {
   const list = Array.isArray(req.body) ? req.body : [];
   if (!list.length) return res.status(400).json({ error: 'empty_array' });
@@ -290,7 +273,6 @@ app.post('/entries/bulk', (req, res) => {
   res.status(207).json({ summary, results });
 });
 
-// Listar con filtros/paginación
 app.get('/entries', (req, res) => {
   const { email, username, domain } = req.query;
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
@@ -311,7 +293,6 @@ app.get('/entries', (req, res) => {
   res.json({ total: count, entries: rows.map(r => toRow(r, decToken)) });
 });
 
-// Lookup (id | email | username | mm_uid)
 app.get('/entries/lookup', (req, res) => {
   const id = req.query.id ? Number(req.query.id) : null;
   const email = normEmail(req.query.email);
@@ -328,7 +309,6 @@ app.get('/entries/lookup', (req, res) => {
   res.json({ entry: toRow(row, decToken) });
 });
 
-// Read/Update/Delete por id
 app.get('/entries/:id', (req, res) => {
   const row = selById.get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not_found' });
@@ -368,7 +348,6 @@ app.delete('/entries/:id', (req, res) => {
   res.json({ deleted: info.changes > 0 });
 });
 
-// VALIDATE
 app.get('/validate', (req, res) => {
   const email = normEmail(req.query.email);
   const username = (req.query.username || '').trim();
