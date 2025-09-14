@@ -7,7 +7,6 @@ import rateLimit from 'express-rate-limit';
 import db from './db.js';
 import { encryptWithKey, decryptWithKeys } from './crypto.js';
 import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
-// cambios xD
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,62 +14,50 @@ import YAML from 'yaml';
 import swaggerUi from 'swagger-ui-express';
 
 // ====== Modo / entorno ======
-const APP_MODE = process.env.APP_MODE || ''; // "1" prod, "2" dev (opcional)
+const APP_MODE = process.env.APP_MODE || ''; // "1" prod, "2" dev
 if (APP_MODE === '1') process.env.NODE_ENV = 'production';
 if (APP_MODE === '2') process.env.NODE_ENV = 'development';
+const IS_DEV = process.env.NODE_ENV === 'development';
 
 // ====== Config ======
 const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'change-me';
 const API_KEY_OLD = process.env.API_KEY_OLD || '';
-const ENC_KEY = process.env.ENC_KEY || '';            // clave actual (hex 64)
-const ENC_KEY_OLD = process.env.ENC_KEY_OLD || '';    // clave anterior (hex 64) para rotación
-const VALIDATE_DOMAIN = (process.env.VALIDATE_DOMAIN || '').toLowerCase().trim(); // ej. "empresa.com"
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+const ENC_KEY = process.env.ENC_KEY || '';
+const ENC_KEY_OLD = process.env.ENC_KEY_OLD || '';
+const VALIDATE_DOMAIN = (process.env.VALIDATE_DOMAIN || '').toLowerCase().trim();
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// Docs config
+const DOCS_ENABLED = String(process.env.DOCS_ENABLED ?? 'true').toLowerCase() === 'true';
+const DOCS_RELAX = String(process.env.DOCS_RELAX ?? (IS_DEV ? 'true' : 'false')).toLowerCase() === 'true';
+
+// Paths y carga de OpenAPI
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let openapiDoc = null;
+try {
+  const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
+  if (fs.existsSync(openapiPath)) {
+    openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
+  }
+} catch (e) {
+  console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
+}
 
 // ====== Middlewares base ======
-//app.use(helmet());
 
-// Helmet solo para rutas NO-docs
-const helmetBase = helmet(); // tus defaults
+// Helmet global (excluye docs/openapi si vamos a relajarlos)
 const DOCS_RE = /^\/(?:docs(?:\/.*)?|redoc|openapi\.json)$/;
-
+const helmetBase = helmet();
 app.use((req, res, next) => {
-  if (DOCS_RE.test(req.path || '')) return next(); // ❌ no aplicar helmet aquí
-  return helmetBase(req, res, next);               // ✅ helmet en el resto
+  if (DOCS_ENABLED && DOCS_RELAX && DOCS_RE.test(req.path || '')) return next();
+  return helmetBase(req, res, next);
 });
 
-// TEMPORAL
-// --- Headers relajados para documentación ---
-// Headers relajados (CSP/COOP) para docs/redoc
-const relaxDocsHeaders = (req, res, next) => {
-  const isRedoc = req.path === '/redoc';
-
-  const csp = [
-    "default-src 'self'",
-    "base-uri 'self'",
-    "object-src 'none'",
-    "img-src 'self' data:",
-    "font-src 'self' https: data:",
-    "style-src 'self' https: 'unsafe-inline'",
-    // Swagger UI (scripts locales) y Redoc (CDN)
-    isRedoc
-      ? "script-src 'self' https://cdn.redoc.ly 'unsafe-inline' 'unsafe-eval'"
-      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-  ].join('; ');
-
-  res.setHeader('Content-Security-Policy', csp);
-  // Evita warnings por HTTP y aislamiento en PWD
-  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
-  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
-
-  next();
-};
-
-// CORS estricto (si no configuras, permite todo como antes)
+// CORS estricto
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
@@ -80,18 +67,17 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '256kb' }));
-app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'tiny'));
+app.use(morgan(IS_DEV ? 'dev' : 'tiny'));
 
-// Rate limit global (60s ventana / 120 reqs)
-const limiter = rateLimit({
+// Rate limit global
+app.use(rateLimit({
   windowMs: 60_000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
-});
-app.use(limiter);
+}));
 
-// Request-id + latencia simple (logs)
+// Request-id + latencia simple
 app.use((req, res, next) => {
   const rid = Math.random().toString(36).slice(2, 10);
   const start = Date.now();
@@ -103,7 +89,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Timeout por respuesta (12s)
+// Timeout por respuesta
 app.use((req, res, next) => {
   res.setTimeout(12_000, () => {
     if (!res.headersSent) res.status(504).json({ error: 'timeout' });
@@ -112,54 +98,44 @@ app.use((req, res, next) => {
   next();
 });
 
-// Auth por API key + rotación (salta health y openapi)
-// app.use((req, res, next) => {
-//  if (req.path === '/health' || req.path === '/openapi.json') return next();
-//  const k = req.header('X-API-Key') || '';
-//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
-//  return res.status(401).json({ error: 'unauthorized' });
-// });
+// ====== Docs (Swagger/Redoc) y OpenAPI ======
 
-// Auth por API key + rotación (salta health, openapi y docs/redoc)
-// app.use((req, res, next) => {
-//  const p = req.path || '';
-//  const isPublic =
-//    p === '/health' ||
-//    p === '/openapi.json' ||
-//    p === '/redoc' ||
-//    p.startsWith('/docs'); // incluye /docs y todos sus assets (css/js)
+const relaxDocsHeaders = (req, res, next) => {
+  const isRedoc = req.path === '/redoc';
+  const csp = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "img-src 'self' data:",
+    "font-src 'self' https: data:",
+    "style-src 'self' https: 'unsafe-inline'",
+    isRedoc
+      ? "script-src 'self' https://cdn.redoc.ly 'unsafe-inline' 'unsafe-eval'"
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  next();
+};
 
-//  if (isPublic) return next();
-
-//  const k = req.header('X-API-Key') || '';
-//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
-//  return res.status(401).json({ error: 'unauthorized' });
-//});
-// Swagger UI (/docs) y OpenAPI JSON
-// (1) Cargar openapi.yaml (si falla, sirve fallback JSON)
-let openapiDoc = null;
-try {
-  const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
-  openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
-} catch (e) {
-  console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
-}
-
-// (2) Rutas públicas de docs/redoc/openapi con headers relajados (SIN helmet)
-if (openapiDoc) {
-  app.get('/openapi.json', relaxDocsHeaders, (_req, res) => res.json(openapiDoc));
-  app.use('/docs', relaxDocsHeaders, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
-    explorer: true,
-    swaggerOptions: { persistAuthorization: true },
-  }));
-} else {
-  app.get('/openapi.json', relaxDocsHeaders, (_req, res) =>
-    res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } })
-  );
-}
-app.get('/redoc', relaxDocsHeaders, (_req, res) => {
-  const url = '/openapi.json';
-  res.type('html').send(`<!doctype html>
+if (DOCS_ENABLED) {
+  const docsMw = DOCS_RELAX ? [relaxDocsHeaders] : [];
+  if (openapiDoc) {
+    app.get('/openapi.json', ...docsMw, (_req, res) => res.json(openapiDoc));
+    app.use('/docs', ...docsMw, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+      explorer: true,
+      swaggerOptions: { persistAuthorization: true },
+    }));
+  } else {
+    app.get('/openapi.json', ...docsMw, (_req, res) =>
+      res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } })
+    );
+  }
+  app.get('/redoc', ...docsMw, (_req, res) => {
+    const url = '/openapi.json';
+    res.type('html').send(`<!doctype html>
 <html>
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
@@ -167,9 +143,10 @@ app.get('/redoc', relaxDocsHeaders, (_req, res) => {
   <redoc spec-url="${url}"></redoc>
   <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
 </body></html>`);
-});
+  });
+}
 
-// Auth por API key + rotación (salta health, openapi y docs/redoc + assets)
+// ====== Auth por API key (público: health, openapi, docs, redoc, favicon) ======
 const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
 app.use((req, res, next) => {
   if (PUBLIC_RE.test(req.path || '')) return next();
@@ -188,13 +165,11 @@ const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
 const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
 const selByUid   = db.prepare('SELECT * FROM entries WHERE mm_uid=?');
 
-// 👉 INSERT puro (create-only, SIN upsert)
 const insertStmt = db.prepare(`
   INSERT INTO entries (username, email, panelUrl, token, active, mm_uid)
   VALUES (@username, @email, @panelUrl, @token, @active, @mm_uid)
 `);
 
-// 👉 UPDATE por id (no toca id)
 const updateStmt = db.prepare(`
   UPDATE entries
      SET username = COALESCE(@username, username),
@@ -207,14 +182,12 @@ const updateStmt = db.prepare(`
    WHERE id=@id
 `);
 
-// 👉 Utilidad para mapear violaciones UNIQUE a 409 Conflict
 function conflictFromSqliteError(e) {
   const msg = String(e.message || '').toLowerCase();
   const fields = [];
   if (msg.includes('email'))    fields.push('email');
   if (msg.includes('username')) fields.push('username');
   if (msg.includes('mm_uid'))   fields.push('mm_uid');
-  // nombres de índices alternativos
   if (msg.includes('unq_entries_username')) fields.push('username');
   if (msg.includes('unq_entries_mm_uid'))   fields.push('mm_uid');
   return { status: 409, body: { error: 'conflict', fields: [...new Set(fields)] } };
@@ -222,48 +195,7 @@ function conflictFromSqliteError(e) {
 
 // ====== Rutas ======
 app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// app.get('/openapi.json', (_req, res) => {
-  // respuesta mínima; mantén tu openapi real si ya lo tenías
-//  res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
-// });
-
-// cambios xD
-//const __filename = fileURLToPath(import.meta.url);
-//const __dirname = path.dirname(__filename);
-
-// Carga openapi.yaml una vez al arrancar
-// const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
-// const openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
-
-// Carga OpenAPI YAML (si falta, no rompas)
-let openapiDoc = null;
-try {
-  const openapiPath = path.join(__dirname, '..', 'openapi.yaml'); // asegúrate de COPY en Dockerfile
-  openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
-} catch (e) {
-  console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
-}
-
-// Helmet relajado solo para documentación (evita bloqueos de scripts/recursos)
-const helmetDocs = helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginOpenerPolicy: false,
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-});
-
-// Sirve JSON para integraciones
-//app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
-
-// Sirve Swagger UI en /docs
-// app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiDoc, {
-//  explorer: true,
-//  swaggerOptions: {
- //   persistAuthorization: true
-//  }
-//}));
-
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
 // CREATE (create-only). Si hay duplicado -> 409
 app.post('/entries', (req, res) => {
@@ -290,11 +222,11 @@ app.post('/entries', (req, res) => {
       const { status, body } = conflictFromSqliteError(e);
       return res.status(status).json(body);
     }
-    throw e; // cae en el middleware de error 500
+    throw e;
   }
 });
 
-// BULK create-only: intenta crear cada item; si choca -> reporta conflicto en results
+// BULK create-only
 app.post('/entries/bulk', (req, res) => {
   const list = Array.isArray(req.body) ? req.body : [];
   if (!list.length) return res.status(400).json({ error: 'empty_array' });
@@ -323,11 +255,7 @@ app.post('/entries/bulk', (req, res) => {
       } catch (e) {
         if (String(e.code).startsWith('SQLITE_CONSTRAINT')) {
           const { body } = conflictFromSqliteError(e);
-          results.push({
-            ok: false,
-            ...body,
-            item: { username: payload.username, email: payload.email, mm_uid: payload.mm_uid }
-          });
+          results.push({ ok: false, ...body, item: { username: payload.username, email: payload.email, mm_uid: payload.mm_uid } });
         } else {
           results.push({ ok: false, error: 'internal_error' });
         }
@@ -366,7 +294,7 @@ app.get('/entries', (req, res) => {
   res.json({ total: count, entries: rows.map(r => toRow(r, decToken)) });
 });
 
-// Lookup one (id | email | username | mm_uid)
+// Lookup (id | email | username | mm_uid)
 app.get('/entries/lookup', (req, res) => {
   const id = req.query.id ? Number(req.query.id) : null;
   const email = normEmail(req.query.email);
@@ -390,7 +318,6 @@ app.get('/entries/:id', (req, res) => {
   res.json({ entry: toRow(row, decToken) });
 });
 
-// UPDATE por id (conflictos -> 409)
 app.put('/entries/:id', (req, res) => {
   const existing = selById.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not_found' });
@@ -424,7 +351,7 @@ app.delete('/entries/:id', (req, res) => {
   res.json({ deleted: info.changes > 0 });
 });
 
-// VALIDATE con dominio opcional (y soporte mm_uid)
+// VALIDATE
 app.get('/validate', (req, res) => {
   const email = normEmail(req.query.email);
   const username = (req.query.username || '').trim();
@@ -470,5 +397,6 @@ app.use((err, req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Allowlist API listening on :${PORT}`);
+  console.log(`Allowlist API listening on :${PORT} (env: ${process.env.NODE_ENV || 'unknown'})`);
+  console.log(`Docs: ${DOCS_ENABLED ? '/docs (enabled)' : 'disabled'} | Relax: ${DOCS_RELAX}`);
 });
