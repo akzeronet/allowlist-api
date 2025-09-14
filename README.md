@@ -152,10 +152,10 @@ flowchart LR
 ## 🖼️ Diagramas
 
 ### Flujo de validación
-![Flujo de validación](./docs/allowlist_flow.png)
+![Flujo de validación](./allowlist_flow.png)
 
 ### Deployment
-![Deployment](./docs/allowlist_deployment.png)
+![Deployment](./allowlist_deployment.png)
 
 
 ## 🖥️ Instalación en Easypanel
