@@ -10,6 +10,9 @@ COPY package*.json ./
 # ✔ instala dependencias de producción sin requerir lockfile preexistente
 RUN npm install --omit=dev --no-audit --no-fund
 
+# 👇 esta línea para incluir el spec
+COPY openapi.yaml ./
+
 # copia el código
 COPY src ./src
 
