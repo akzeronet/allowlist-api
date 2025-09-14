@@ -7,6 +7,12 @@ import rateLimit from 'express-rate-limit';
 import db from './db.js';
 import { encryptWithKey, decryptWithKeys } from './crypto.js';
 import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
+// cabios xD
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import YAML from 'yaml';
+import swaggerUi from 'swagger-ui-express';
 
 // ====== Modo / entorno ======
 const APP_MODE = process.env.APP_MODE || ''; // "1" prod, "2" dev (opcional)
@@ -122,9 +128,48 @@ function conflictFromSqliteError(e) {
 // ====== Rutas ======
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-app.get('/openapi.json', (_req, res) => {
+// app.get('/openapi.json', (_req, res) => {
   // respuesta mínima; mantén tu openapi real si ya lo tenías
-  res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
+//  res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
+// });
+
+// cabios xD
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Carga openapi.yaml una vez al arrancar
+const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
+const openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
+
+// Sirve JSON para integraciones
+app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
+
+// Sirve Swagger UI en /docs
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+  explorer: true,
+  swaggerOptions: {
+    persistAuthorization: true
+  }
+}));
+
+app.get('/redoc', (_req, res) => {
+  const url = '/openapi.json';
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Allowlist API - Redoc</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <redoc spec-url="${url}"></redoc>
+  <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
+</body>
+</html>
+  `);
 });
 
 // CREATE (create-only). Si hay duplicado -> 409
