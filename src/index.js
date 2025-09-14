@@ -7,7 +7,7 @@ import rateLimit from 'express-rate-limit';
 import db from './db.js';
 import { encryptWithKey, decryptWithKeys } from './crypto.js';
 import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
-// cabios xD
+// cambios xD
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -133,7 +133,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 //  res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
 // });
 
-// cabios xD
+// cambios xD
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
