@@ -76,8 +76,24 @@ app.use((req, res, next) => {
 });
 
 // Auth por API key + rotación (salta health y openapi)
+// app.use((req, res, next) => {
+//  if (req.path === '/health' || req.path === '/openapi.json') return next();
+//  const k = req.header('X-API-Key') || '';
+//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
+//  return res.status(401).json({ error: 'unauthorized' });
+// });
+
+// Auth por API key + rotación (salta health, openapi y docs/redoc)
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/openapi.json') return next();
+  const p = req.path || '';
+  const isPublic =
+    p === '/health' ||
+    p === '/openapi.json' ||
+    p === '/redoc' ||
+    p.startsWith('/docs'); // incluye /docs y todos sus assets (css/js)
+
+  if (isPublic) return next();
+
   const k = req.header('X-API-Key') || '';
   if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
   return res.status(401).json({ error: 'unauthorized' });
