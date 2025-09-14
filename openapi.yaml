@@ -1,0 +1,215 @@
+openapi: 3.0.3
+info:
+  title: Allowlist API
+  version: 1.2.0
+servers:
+  - url: /
+tags:
+  - name: entries
+  - name: validate
+paths:
+  /health:
+    get:
+      summary: Health check
+      tags: [system]
+      responses:
+        '200':
+          description: OK
+
+  /entries:
+    get:
+      summary: List entries
+      tags: [entries]
+      parameters:
+        - in: query
+          name: email
+          schema: { type: string, format: email }
+        - in: query
+          name: username
+          schema: { type: string }
+        - in: query
+          name: domain
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: OK
+
+    post:
+      summary: Create entry
+      description: Crea un registro. Devuelve **409** si `username`, `email` o `mm_uid` ya existen.
+      tags: [entries]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEntry'
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Missing fields
+        '409':
+          description: Conflict (username/email/mm_uid already exist)
+
+  /entries/{id}:
+    get:
+      summary: Get entry by id
+      tags: [entries]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+
+    put:
+      summary: Update entry by id
+      description: Actualiza un registro existente. Devuelve **409** si intenta usar `username/email/mm_uid` que ya existen en otro registro.
+      tags: [entries]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEntry'
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200': { description: Updated }
+        '404': { description: Not found }
+        '409': { description: Conflict }
+
+    delete:
+      summary: Delete entry by id
+      tags: [entries]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200': { description: Deleted }
+
+  /entries/lookup:
+    get:
+      summary: Lookup one by id | email | username | mm_uid
+      tags: [entries]
+      parameters:
+        - in: query
+          name: id
+          schema: { type: integer }
+        - in: query
+          name: email
+          schema: { type: string, format: email }
+        - in: query
+          name: username
+          schema: { type: string }
+        - in: query
+          name: mm_uid
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+
+  /entries/bulk:
+    post:
+      summary: Bulk create (create-only por item)
+      description: Intenta crear cada item. Los conflictos por `username/email/mm_uid` se devuelven por item.
+      tags: [entries]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/CreateEntry' }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '207': { description: Multi-status summary }
+
+  /validate:
+    get:
+      summary: Validate entry
+      description: Valida por `email` **o** `username` **o** `mm_uid`. Solo válido si `active = true`.  
+      tags: [validate]
+      parameters:
+        - in: query
+          name: email
+          schema: { type: string, format: email }
+        - in: query
+          name: username
+          schema: { type: string }
+        - in: query
+          name: mm_uid
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200': { description: OK }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Entry:
+      type: object
+      properties:
+        id:        { type: integer }
+        username:  { type: string }
+        email:     { type: string, format: email }
+        panelUrl:  { type: string, format: uri }
+        token:     { type: string, description: "Devuelto en claro; guardado cifrado si ENC_KEY está configurada" }
+        active:    { type: boolean }
+        mm_uid:    { type: string, nullable: true, description: "UNIQUE; múltiples NULL permitidos" }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+
+    CreateEntry:
+      type: object
+      required: [username, email, panelUrl, token]
+      properties:
+        username: { type: string }
+        email:    { type: string, format: email }
+        panelUrl: { type: string, format: uri }
+        token:    { type: string }
+        active:   { type: boolean, default: true }
+        mm_uid:   { type: string, nullable: true }
+
+    UpdateEntry:
+      type: object
+      properties:
+        username: { type: string }
+        email:    { type: string, format: email }
+        panelUrl: { type: string, format: uri }
+        token:    { type: string }
+        active:   { type: boolean }
+        mm_uid:   { type: string, nullable: true }
