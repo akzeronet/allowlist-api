@@ -87,22 +87,17 @@ const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
 const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
 const selByUid   = db.prepare('SELECT * FROM entries WHERE mm_uid=?');
 
+// 👉 INSERT puro (create-only, SIN upsert)
 const insertStmt = db.prepare(`
   INSERT INTO entries (username, email, panelUrl, token, active, mm_uid)
-  VALUES (@username, @lowerEmail, @panelUrl, @token, @active, @mm_uid)
-  ON CONFLICT(email) DO UPDATE SET
-    username = excluded.username,
-    panelUrl = excluded.panelUrl,
-    token    = excluded.token,
-    active   = excluded.active,
-    mm_uid   = COALESCE(excluded.mm_uid, entries.mm_uid),
-    updatedAt = datetime('now')
+  VALUES (@username, @email, @panelUrl, @token, @active, @mm_uid)
 `);
 
+// 👉 UPDATE por id (no toca id)
 const updateStmt = db.prepare(`
   UPDATE entries
      SET username = COALESCE(@username, username),
-         email    = COALESCE(@lowerEmail, email),
+         email    = COALESCE(@email, email),
          panelUrl = COALESCE(@panelUrl, panelUrl),
          token    = COALESCE(@token, token),
          active   = COALESCE(@active, active),
@@ -110,6 +105,19 @@ const updateStmt = db.prepare(`
          updatedAt = datetime('now')
    WHERE id=@id
 `);
+
+// 👉 Utilidad para mapear violaciones UNIQUE a 409 Conflict
+function conflictFromSqliteError(e) {
+  const msg = String(e.message || '').toLowerCase();
+  const fields = [];
+  if (msg.includes('email'))    fields.push('email');
+  if (msg.includes('username')) fields.push('username');
+  if (msg.includes('mm_uid'))   fields.push('mm_uid');
+  // nombres de índices alternativos
+  if (msg.includes('unq_entries_username')) fields.push('username');
+  if (msg.includes('unq_entries_mm_uid'))   fields.push('mm_uid');
+  return { status: 409, body: { error: 'conflict', fields: [...new Set(fields)] } };
+}
 
 // ====== Rutas ======
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -119,63 +127,84 @@ app.get('/openapi.json', (_req, res) => {
   res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.1.0' }});
 });
 
-// Crear/Upsert (ignora cualquier id; permite mm_uid)
+// CREATE (create-only). Si hay duplicado -> 409
 app.post('/entries', (req, res) => {
   const { id, ...raw } = req.body || {};
-  const body = sanitizeEntryPayload(raw);
-  const { username, email, panelUrl, token } = body;
-  const errors = validateBody({ username, email, panelUrl, token });
-  if (errors.length) return res.status(400).json({ error: 'missing fields', fields: errors });
+  const b = sanitizeEntryPayload(raw);
+  const missing = validateBody(b);
+  if (missing.length) return res.status(400).json({ error: 'missing fields', fields: missing });
 
-  const lowerEmail = normEmail(email);
   const payload = {
-    username,
-    lowerEmail,
-    panelUrl,
-    token: encToken(token),
-    active: body.active ? 1 : 0,
-    mm_uid: body.mm_uid ?? null,
+    username: b.username,
+    email: normEmail(b.email),
+    panelUrl: b.panelUrl,
+    token: encToken(b.token),
+    active: b.active ? 1 : 0,
+    mm_uid: b.mm_uid ?? null,
   };
 
-  const info = insertStmt.run(payload);
-  const row = selByEmail.get(lowerEmail);
-  res.status(info.changes ? 201 : 200).json({ upsert: true, entry: toRow(row, decToken) });
+  try {
+    insertStmt.run(payload);
+    const row = selByEmail.get(payload.email);
+    return res.status(201).json({ created: true, entry: toRow(row, decToken) });
+  } catch (e) {
+    if (String(e.code).startsWith('SQLITE_CONSTRAINT')) {
+      const { status, body } = conflictFromSqliteError(e);
+      return res.status(status).json(body);
+    }
+    throw e; // cae en el middleware de error 500
+  }
 });
 
-// Alta masiva (/entries/bulk) — upsert por email
+// BULK create-only: intenta crear cada item; si choca -> reporta conflicto en results
 app.post('/entries/bulk', (req, res) => {
   const list = Array.isArray(req.body) ? req.body : [];
   if (!list.length) return res.status(400).json({ error: 'empty_array' });
 
   const tx = db.transaction((rows) => {
-    let created = 0, updated = 0, errors = 0;
+    const results = [];
     for (const raw of rows) {
+      const b = sanitizeEntryPayload(raw);
+      const missing = validateBody(b);
+      if (missing.length) {
+        results.push({ ok: false, error: 'missing_fields', fields: missing, item: b });
+        continue;
+      }
+      const payload = {
+        username: b.username,
+        email: normEmail(b.email),
+        panelUrl: b.panelUrl,
+        token: encToken(b.token),
+        active: b.active ? 1 : 0,
+        mm_uid: b.mm_uid ?? null,
+      };
       try {
-        const b = sanitizeEntryPayload(raw);
-        const missing = validateBody(b);
-        if (missing.length) { errors++; continue; }
-        const lowerEmail = normEmail(b.email);
-        const payload = {
-          username: b.username,
-          lowerEmail,
-          panelUrl: b.panelUrl,
-          token: encToken(b.token),
-          active: b.active ? 1 : 0,
-          mm_uid: b.mm_uid ?? null,
-        };
-        const before = selByEmail.get(lowerEmail);
         insertStmt.run(payload);
-        const after = selByEmail.get(lowerEmail);
-        if (before) updated++; else created++;
-      } catch {
-        errors++;
+        const row = selByEmail.get(payload.email);
+        results.push({ ok: true, entry: toRow(row, decToken) });
+      } catch (e) {
+        if (String(e.code).startsWith('SQLITE_CONSTRAINT')) {
+          const { body } = conflictFromSqliteError(e);
+          results.push({
+            ok: false,
+            ...body,
+            item: { username: payload.username, email: payload.email, mm_uid: payload.mm_uid }
+          });
+        } else {
+          results.push({ ok: false, error: 'internal_error' });
+        }
       }
     }
-    return { created, updated, errors, total: rows.length };
+    return results;
   });
 
-  const result = tx(list);
-  res.status(207).json({ status: 'multi', ...result });
+  const results = tx(list);
+  const summary = {
+    total: results.length,
+    created: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+  };
+  res.status(207).json({ summary, results });
 });
 
 // Listar con filtros/paginación
@@ -223,23 +252,33 @@ app.get('/entries/:id', (req, res) => {
   res.json({ entry: toRow(row, decToken) });
 });
 
+// UPDATE por id (conflictos -> 409)
 app.put('/entries/:id', (req, res) => {
-  const row = selById.get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'not_found' });
+  const existing = selById.get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'not_found' });
 
   const b = sanitizeEntryPayload(req.body);
   const payload = {
     id: req.params.id,
     username: b.username ?? null,
-    lowerEmail: b.email ? normEmail(b.email) : null,
+    email: b.email ? normEmail(b.email) : null,
     panelUrl: b.panelUrl ?? null,
     token: b.token ? encToken(b.token) : null,
     active: typeof b.active === 'boolean' ? (b.active ? 1 : 0) : null,
     mm_uid: b.mm_uid ?? null,
   };
-  updateStmt.run(payload);
-  const updated = selById.get(req.params.id);
-  res.json({ updated: true, entry: toRow(updated, decToken) });
+
+  try {
+    updateStmt.run(payload);
+    const updated = selById.get(req.params.id);
+    return res.json({ updated: true, entry: toRow(updated, decToken) });
+  } catch (e) {
+    if (String(e.code).startsWith('SQLITE_CONSTRAINT')) {
+      const { status, body } = conflictFromSqliteError(e);
+      return res.status(status).json(body);
+    }
+    throw e;
+  }
 });
 
 app.delete('/entries/:id', (req, res) => {
