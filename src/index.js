@@ -24,6 +24,7 @@ const IS_DEV = process.env.NODE_ENV === 'development';
 // ===== Config
 const app = express();
 const PORT = process.env.PORT || 8080;
+
 const API_KEY = process.env.API_KEY || 'change-me';
 const API_KEY_OLD = process.env.API_KEY_OLD || '';
 const USE_MULTI_KEYS = (process.env.USE_MULTI_KEYS || 'true').toLowerCase() !== 'false';
@@ -71,7 +72,7 @@ app.use(cors({
 
 app.use(express.json({
   limit: '256kb',
-  verify: (req, _res, buf) => { req.rawBody = buf; }
+  verify: (req, _res, buf) => { req.rawBody = buf; } // para HMAC
 }));
 
 app.use(morgan(IS_DEV ? 'dev' : 'tiny'));
@@ -111,7 +112,7 @@ app.use('/assets', express.static(
 // ===== Docs (Swagger/Redoc)
 const relaxDocsHeaders = (req, res, next) => {
   const isRedoc = req.path === '/redoc';
-  const csp = [
+  const directives = [
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
@@ -121,8 +122,8 @@ const relaxDocsHeaders = (req, res, next) => {
     isRedoc
       ? "script-src 'self' 'unsafe-inline'"
       : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-  }.join('; ');
-  res.setHeader('Content-Security-Policy', csp);
+  ];
+  res.setHeader('Content-Security-Policy', directives.join('; '));
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
@@ -169,7 +170,6 @@ function verifyHmac(req) {
   const sig = req.header('X-Signature') || '';
   if (!ts || !sig) return false;
 
-  // 5 min ventana (servidor en segundos; ts en ms o s)
   const nowSec = Math.floor(Date.now() / 1000);
   const tsNum = Number(ts);
   const tsSec = tsNum > 1e12 ? Math.floor(tsNum / 1000) : tsNum;
@@ -182,11 +182,8 @@ function verifyHmac(req) {
   const base = `${req.method}\n${req.originalUrl}\n${ts}\n${bodyHash}`;
   const expect = crypto.createHmac('sha256', HMAC_SECRET).update(base).digest('hex');
 
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
-  } catch {
-    return false;
-  }
+  try { return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect)); }
+  catch { return false; }
 }
 
 /**
@@ -205,7 +202,7 @@ app.use((req, res, next) => {
   if (API_KEY && header === API_KEY) { req.auth = { type: 'global', scopes: ['admin'] }; return next(); }
   if (API_KEY_OLD && header === API_KEY_OLD) { req.auth = { type: 'global-old', scopes: ['admin'] }; return next(); }
 
-  // HMAC (si está activo concede admin)
+  // HMAC (admin)
   if (verifyHmac(req)) { req.auth = { type: 'hmac', scopes: ['admin'] }; return next(); }
 
   // Multi-keys
@@ -461,7 +458,7 @@ app.get('/validate', requireScope('read'), (req, res) => {
 
 // ===== Admin de API keys (requiere 'admin')
 function newKid() {
-  return 'ak_' + crypto.randomBytes(6).toString('hex'); // ej: ak_12ab34cd56ef
+  return 'ak_' + crypto.randomBytes(6).toString('hex');
 }
 function newSecret() {
   return crypto.randomBytes(24).toString('base64url');
@@ -485,7 +482,7 @@ app.post('/keys', requireScope('admin'), (req, res) => {
   res.status(201).json({
     created: true,
     key: { id: info.lastInsertRowid, name, kid, scopes, active: !!active },
-    token: `${kid}.${secret}` // <-- mostrar solo una vez
+    token: `${kid}.${secret}`
   });
 });
 
