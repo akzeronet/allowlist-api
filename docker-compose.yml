@@ -2,32 +2,34 @@ services:
   allowlist:
     build: .
     container_name: allowlist-api
-    ports:
-      - "8080:8080"
+    ports: ["8080:8080"]
     environment:
       # 🔐 Seguridad
       API_KEY: "pon-aqui-una-clave-larga-y-aleatoria"
-      API_KEY_OLD: ""         # opcional (rotación)
-      ENC_KEY: ""             # openssl rand -hex 32  (ACTIVA cifrado)
-      ENC_KEY_OLD: ""         # opcional (rotación de cifrado)
+      API_KEY_OLD: ""
+      ENC_KEY: ""
+      ENC_KEY_OLD: ""
 
-      # 🌐 CORS: separa por comas si quieres restringir
-      # ejemplo: https://n8n.mi.com,https://otro.origen.com
+      # 🌐 CORS
       CORS_ORIGINS: ""
 
-      # 🛃 Validación por dominio (opcional), ej: empresa.com
+      # 🛃 Dominio opcional
       VALIDATE_DOMAIN: ""
 
-      # 🕒 DB + Zona horaria
+      # 🕒 DB + TZ
       DB_PATH: "/app/data/data.db"
       TZ: "America/Santo_Domingo"
 
-      # ⚙️ Modo: 1=production, 2=development
+      # ⚙️ Modo
       APP_MODE: "1"
 
-      # 📖 Documentación API
+      # 📖 Docs
       DOCS_ENABLED: "true"
-      DOCS_RELAX: "true"      # en dev=true; en prod=false recomendado
+      DOCS_RELAX: "true"     # en prod pon "false" recomendado
+
+      # 🔑 NUEVO: multi-keys (scopes) y HMAC
+      USE_MULTI_KEYS: "true" # default ya es true; lo dejo explícito
+      HMAC_SECRET: ""        # pon un secreto para firmar con HMAC si lo vas a usar
     volumes:
       - ./data:/app/data
     restart: unless-stopped
