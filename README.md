@@ -34,17 +34,22 @@ TZ=America/Santo_Domingo
 
 ### ▶️ Uso con Docker
 Levantar contenedor
+
 ``` docker compose up -d ```
 
 Ver logs
+
 ``` docker logs -f allowlist-api ```
 
 Detener contenedor
+
 ``` docker compose down ```
 
 Actualizar tras cambios en repo
 ``` git pull origin realoaded  # esta rama```
+
 ``` docker compose build ```
+
 ``` docker compose up -d ```
 
 * La base de datos (data.db) se guarda en ./data (mapeada como volumen).
