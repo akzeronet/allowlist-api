@@ -9,8 +9,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import YAML from 'yaml';
 import swaggerUi from 'swagger-ui-express';
+import crypto from 'crypto';
 
-import db from './db.js';
+import db, { keySelectByKid, keyInsert, keyList, keyUpdate, keyDelete } from './db.js';
 import { encryptWithKey, decryptWithKeys } from './crypto.js';
 import { toRow, normEmail, validateBody, sanitizeEntryPayload } from './util.js';
 
@@ -25,8 +26,12 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'change-me';
 const API_KEY_OLD = process.env.API_KEY_OLD || '';
+const USE_MULTI_KEYS = (process.env.USE_MULTI_KEYS || 'true').toLowerCase() !== 'false';
+
 const ENC_KEY = process.env.ENC_KEY || '';
 const ENC_KEY_OLD = process.env.ENC_KEY_OLD || '';
+const HMAC_SECRET = process.env.HMAC_SECRET || '';
+
 const VALIDATE_DOMAIN = (process.env.VALIDATE_DOMAIN || '').toLowerCase().trim();
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -64,10 +69,9 @@ app.use(cors({
   maxAge: 600,
 }));
 
-// app.use(express.json({ limit: '256kb' }));
 app.use(express.json({
   limit: '256kb',
-  verify: (req, _res, buf) => { req.rawBody = buf; } // crudo disponible para HMAC si lo activas
+  verify: (req, _res, buf) => { req.rawBody = buf; }
 }));
 
 app.use(morgan(IS_DEV ? 'dev' : 'tiny'));
@@ -117,7 +121,7 @@ const relaxDocsHeaders = (req, res, next) => {
     isRedoc
       ? "script-src 'self' 'unsafe-inline'"
       : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-  ].join('; ');
+  }.join('; ');
   res.setHeader('Content-Security-Policy', csp);
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
@@ -153,59 +157,91 @@ if (DOCS_ENABLED) {
   });
 }
 
-// .env: HMAC_SECRET="super-secreto-compartido"
-const HMAC_SECRET = process.env.HMAC_SECRET || '';
+// ===== Auth: API key global + multi-key (scopes) + HMAC (OR)
+const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
 
-import crypto from 'crypto';
+function sha256hex(s) {
+  return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+}
 function verifyHmac(req) {
   if (!HMAC_SECRET) return false;
   const ts = req.header('X-Timestamp') || '';
   const sig = req.header('X-Signature') || '';
   if (!ts || !sig) return false;
-  const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - Number(ts)) > 300) return false; // 5 min ventana
 
-  const body = req.rawBody || JSON.stringify(req.body || '');
-//  const bodyHash = crypto.createHash('sha256').update(body || '').digest('hex');
+  // 5 min ventana (servidor en segundos; ts en ms o s)
+  const nowSec = Math.floor(Date.now() / 1000);
+  const tsNum = Number(ts);
+  const tsSec = tsNum > 1e12 ? Math.floor(tsNum / 1000) : tsNum;
+  if (!Number.isFinite(tsSec) || Math.abs(nowSec - tsSec) > 300) return false;
+
   const bodyHash = crypto.createHash('sha256')
-  .update(req.rawBody ? req.rawBody : Buffer.from(''))
-  .digest('hex');
+    .update(req.rawBody ? req.rawBody : Buffer.from(''))
+    .digest('hex');
+
   const base = `${req.method}\n${req.originalUrl}\n${ts}\n${bodyHash}`;
   const expect = crypto.createHmac('sha256', HMAC_SECRET).update(base).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
+  } catch {
+    return false;
+  }
 }
 
-// Guarda raw body para hash exacto
-// app.use((req, res, next) => {
-//  let data = '';
-//  req.on('data', (c) => { data += c; });
-//  req.on('end', () => { req.rawBody = data; next(); });
-// });
-
-// Auth combinada: API key o HMAC
-const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
+/**
+ * Middleware de autenticación:
+ *  - Público: /health, /docs, /redoc, /openapi.json, /favicon.ico
+ *  - Global API key (compat): X-API-Key === API_KEY|API_KEY_OLD => scopes ['admin']
+ *  - Multi-key: X-API-Key = "kid.secret" => valida en tabla api_keys
+ *  - HMAC: si firma correcta => scopes ['admin'] (full)
+ */
 app.use((req, res, next) => {
   if (PUBLIC_RE.test(req.path || '')) return next();
-  const key = req.header('X-API-Key') || '';
-  if (key === API_KEY || (API_KEY_OLD && key === API_KEY_OLD)) return next();
-  if (verifyHmac(req)) return next();
-  return res.status(401).json({ error: 'unauthorized' });
+
+  const header = req.header('X-API-Key') || '';
+
+  // Fallback global
+  if (API_KEY && header === API_KEY) { req.auth = { type: 'global', scopes: ['admin'] }; return next(); }
+  if (API_KEY_OLD && header === API_KEY_OLD) { req.auth = { type: 'global-old', scopes: ['admin'] }; return next(); }
+
+  // HMAC (si está activo concede admin)
+  if (verifyHmac(req)) { req.auth = { type: 'hmac', scopes: ['admin'] }; return next(); }
+
+  // Multi-keys
+  if (!USE_MULTI_KEYS) return res.status(401).json({ error: 'unauthorized' });
+  const dot = header.indexOf('.');
+  if (dot < 1) return res.status(401).json({ error: 'unauthorized' });
+
+  const kid = header.slice(0, dot);
+  const secret = header.slice(dot + 1);
+  if (!kid || !secret) return res.status(401).json({ error: 'unauthorized' });
+
+  const row = keySelectByKid.get(kid);
+  if (!row || !row.active) return res.status(401).json({ error: 'unauthorized' });
+
+  const ok = sha256hex(secret) === row.secretHash;
+  if (!ok) return res.status(401).json({ error: 'unauthorized' });
+
+  const scopes = row.scopes.split(',').map(s => s.trim()).filter(Boolean);
+  req.auth = { type: 'key', kid, scopes };
+  return next();
 });
 
-// ===== Auth por API key (public: health, docs, redoc, openapi, favicon)
-// const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
-// app.use((req, res, next) => {
-//  if (PUBLIC_RE.test(req.path || '')) return next();
-//  const k = req.header('X-API-Key') || '';
-//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
-//  res.status(401).json({ error: 'unauthorized' });
-// });
+// Autorización por scope
+function requireScope(scope) {
+  return (req, res, next) => {
+    const scopes = (req.auth && req.auth.scopes) || [];
+    if (scopes.includes('admin') || scopes.includes(scope)) return next();
+    return res.status(403).json({ error: 'forbidden', need: scope });
+  };
+}
 
 // ===== Cifrado helpers
 const encToken = (plain) => encryptWithKey(plain, ENC_KEY).value;
 const decToken = (wrapped) => (wrapped == null ? null : decryptWithKeys(wrapped, ENC_KEY, ENC_KEY_OLD));
 
-// ===== Statements
+// ===== Statements entries
 const selByEmail = db.prepare('SELECT * FROM entries WHERE lower(email)=lower(?)');
 const selById    = db.prepare('SELECT * FROM entries WHERE id=?');
 const selByUser  = db.prepare('SELECT * FROM entries WHERE lower(username)=lower(?)');
@@ -239,11 +275,12 @@ function conflictFromSqliteError(e) {
   return { status: 409, body: { error: 'conflict', fields: [...new Set(fields)] } };
 }
 
-// ===== Rutas
+// ===== Rutas públicas
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
-app.post('/entries', (req, res) => {
+// ===== Rutas ENTRIES (con scopes)
+app.post('/entries', requireScope('write'), (req, res) => {
   const { id, ...raw } = req.body || {};
   const b = sanitizeEntryPayload(raw);
   const missing = validateBody(b);
@@ -271,7 +308,7 @@ app.post('/entries', (req, res) => {
   }
 });
 
-app.post('/entries/bulk', (req, res) => {
+app.post('/entries/bulk', requireScope('write'), (req, res) => {
   const list = Array.isArray(req.body) ? req.body : [];
   if (!list.length) return res.status(400).json({ error: 'empty_array' });
 
@@ -317,7 +354,7 @@ app.post('/entries/bulk', (req, res) => {
   res.status(207).json({ summary, results });
 });
 
-app.get('/entries', (req, res) => {
+app.get('/entries', requireScope('read'), (req, res) => {
   const { email, username, domain } = req.query;
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
   const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -337,7 +374,7 @@ app.get('/entries', (req, res) => {
   res.json({ total: count, entries: rows.map(r => toRow(r, decToken)) });
 });
 
-app.get('/entries/lookup', (req, res) => {
+app.get('/entries/lookup', requireScope('read'), (req, res) => {
   const id = req.query.id ? Number(req.query.id) : null;
   const email = normEmail(req.query.email);
   const username = (req.query.username || '').trim();
@@ -353,13 +390,13 @@ app.get('/entries/lookup', (req, res) => {
   res.json({ entry: toRow(row, decToken) });
 });
 
-app.get('/entries/:id', (req, res) => {
+app.get('/entries/:id', requireScope('read'), (req, res) => {
   const row = selById.get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not_found' });
   res.json({ entry: toRow(row, decToken) });
 });
 
-app.put('/entries/:id', (req, res) => {
+app.put('/entries/:id', requireScope('write'), (req, res) => {
   const existing = selById.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not_found' });
 
@@ -387,12 +424,13 @@ app.put('/entries/:id', (req, res) => {
   }
 });
 
-app.delete('/entries/:id', (req, res) => {
+app.delete('/entries/:id', requireScope('delete'), (req, res) => {
   const info = db.prepare('DELETE FROM entries WHERE id=?').run(req.params.id);
   res.json({ deleted: info.changes > 0 });
 });
 
-app.get('/validate', (req, res) => {
+// VALIDATE (read)
+app.get('/validate', requireScope('read'), (req, res) => {
   const email = normEmail(req.query.email);
   const username = (req.query.username || '').trim();
   const mm_uid = (req.query.mm_uid || '').trim();
@@ -419,6 +457,56 @@ app.get('/validate', (req, res) => {
   }
 
   res.json({ ok: true, match: toRow(row, decToken) });
+});
+
+// ===== Admin de API keys (requiere 'admin')
+function newKid() {
+  return 'ak_' + crypto.randomBytes(6).toString('hex'); // ej: ak_12ab34cd56ef
+}
+function newSecret() {
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+app.post('/keys', requireScope('admin'), (req, res) => {
+  const name = String(req.body?.name || '').trim() || 'unnamed';
+  const scopesArr = Array.isArray(req.body?.scopes) ? req.body.scopes : ['read'];
+  const scopes = scopesArr.map(s => String(s).trim()).filter(Boolean);
+  const active = req.body?.active === false ? 0 : 1;
+
+  const kid = newKid();
+  const secret = newSecret();
+  const info = keyInsert.run({
+    name, kid,
+    secretHash: sha256hex(secret),
+    scopes: scopes.join(','),
+    active
+  });
+
+  res.status(201).json({
+    created: true,
+    key: { id: info.lastInsertRowid, name, kid, scopes, active: !!active },
+    token: `${kid}.${secret}` // <-- mostrar solo una vez
+  });
+});
+
+app.get('/keys', requireScope('admin'), (_req, res) => {
+  res.json({ keys: keyList.all() });
+});
+
+app.put('/keys/:id', requireScope('admin'), (req, res) => {
+  const payload = {
+    id: Number(req.params.id),
+    name: req.body?.name,
+    scopes: Array.isArray(req.body?.scopes) ? req.body.scopes.join(',') : undefined,
+    active: typeof req.body?.active === 'boolean' ? (req.body.active ? 1 : 0) : undefined,
+  };
+  keyUpdate.run(payload);
+  res.json({ updated: true });
+});
+
+app.delete('/keys/:id', requireScope('admin'), (req, res) => {
+  keyDelete.run(Number(req.params.id));
+  res.json({ deleted: true });
 });
 
 // Diagnóstico
