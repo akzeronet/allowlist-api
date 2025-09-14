@@ -11,9 +11,9 @@ COPY package*.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 # ✅ Descarga Redoc al build (offline en runtime)
-RUN mkdir -p public/redoc \
- && curl -fsSL https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js \
-    -o public/redoc/redoc.standalone.js
+# RUN mkdir -p public/redoc \
+# && curl -fsSL https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js \
+#    -o public/redoc/redoc.standalone.js
 
 # 👇 esta línea para incluir el spec
 COPY openapi.yaml ./
