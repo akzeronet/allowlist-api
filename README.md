@@ -182,3 +182,33 @@ flowchart LR
 
 ### 🛠️ Licencia
 AGPL v3 — Uso libre, contribuciones bienvenidas.
+
+### Cómo usar multi-keys
+
+Crea una key (usa tu API_KEY global o HMAC con scope admin):
+```
+curl -sS -X POST http://host:8080/keys \
+  -H "X-API-Key: TU_API_KEY_GLOBAL" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"n8n-writer","scopes":["read","write"]}'
+# => guarda el "token": ak_xxx.SECRETO
+```
+
+Llama a la API con esa key:
+
+```
+X-API-Key: ak_xxx.SECRETO
+```
+```
+Scopes:
+
+read → GET /entries, /entries/:id, /entries/lookup, /validate
+
+write → POST /entries, /entries/bulk, PUT /entries/:id
+
+delete → DELETE /entries/:id
+
+admin → gestiona /keys y bypass de scopes
+```
+
+Compatibilidad total: siguen funcionando API_KEY/API_KEY_OLD y HMAC (cuando lo firmas, el server te da admin).
