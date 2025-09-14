@@ -98,6 +98,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Static assets (sirve /public bajo /assets)
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.use('/assets', express.static(
+  path.join(__dirname, '..', 'public'),
+  { etag: true, maxAge: IS_DEV ? 0 : '7d' }
+));
+
 // ====== Docs (Swagger/Redoc) y OpenAPI ======
 
 const relaxDocsHeaders = (req, res, next) => {
@@ -109,9 +120,10 @@ const relaxDocsHeaders = (req, res, next) => {
     "img-src 'self' data:",
     "font-src 'self' https: data:",
     "style-src 'self' https: 'unsafe-inline'",
+    // 👇 Con Redoc offline, basta 'self'
     isRedoc
-      ? "script-src 'self' https://cdn.redoc.ly 'unsafe-inline' 'unsafe-eval'"
-      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      ? "script-src 'self' 'unsafe-inline'"
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Swagger UI necesita eval
   ].join('; ');
   res.setHeader('Content-Security-Policy', csp);
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
@@ -133,17 +145,22 @@ if (DOCS_ENABLED) {
       res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } })
     );
   }
-  app.get('/redoc', ...docsMw, (_req, res) => {
-    const url = '/openapi.json';
-    res.type('html').send(`<!doctype html>
+  app.get('/redoc', ...(DOCS_RELAX ? [relaxDocsHeaders] : []), (_req, res) => {
+  const url = '/openapi.json';
+  const localJs = '/assets/redoc/redoc.standalone.js'; // ← servido desde /public
+  res.type('html').send(`<!doctype html>
 <html>
-<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
+<head>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Allowlist API - Redoc</title>
+  <style>html,body{height:100%;margin:0}</style>
+</head>
 <body>
   <redoc spec-url="${url}"></redoc>
-  <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
-</body></html>`);
-  });
+  <script src="${localJs}"></script>
+</body>
+</html>`);
+});
 }
 
 // ====== Auth por API key (público: health, openapi, docs, redoc, favicon) ======
