@@ -148,14 +148,50 @@ if (DOCS_ENABLED) {
   });
 }
 
-// ===== Auth por API key (public: health, docs, redoc, openapi, favicon)
+// .env: HMAC_SECRET="super-secreto-compartido"
+const HMAC_SECRET = process.env.HMAC_SECRET || '';
+
+import crypto from 'crypto';
+function verifyHmac(req) {
+  if (!HMAC_SECRET) return false;
+  const ts = req.header('X-Timestamp') || '';
+  const sig = req.header('X-Signature') || '';
+  if (!ts || !sig) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - Number(ts)) > 300) return false; // 5 min ventana
+
+  const body = req.rawBody || JSON.stringify(req.body || '');
+  const bodyHash = crypto.createHash('sha256').update(body || '').digest('hex');
+  const base = `${req.method}\n${req.originalUrl}\n${ts}\n${bodyHash}`;
+  const expect = crypto.createHmac('sha256', HMAC_SECRET).update(base).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect));
+}
+
+// Guarda raw body para hash exacto
+app.use((req, res, next) => {
+  let data = '';
+  req.on('data', (c) => { data += c; });
+  req.on('end', () => { req.rawBody = data; next(); });
+});
+
+// Auth combinada: API key o HMAC
 const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
 app.use((req, res, next) => {
   if (PUBLIC_RE.test(req.path || '')) return next();
-  const k = req.header('X-API-Key') || '';
-  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
-  res.status(401).json({ error: 'unauthorized' });
+  const key = req.header('X-API-Key') || '';
+  if (key === API_KEY || (API_KEY_OLD && key === API_KEY_OLD)) return next();
+  if (verifyHmac(req)) return next();
+  return res.status(401).json({ error: 'unauthorized' });
 });
+
+// ===== Auth por API key (public: health, docs, redoc, openapi, favicon)
+// const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
+// app.use((req, res, next) => {
+//  if (PUBLIC_RE.test(req.path || '')) return next();
+//  const k = req.header('X-API-Key') || '';
+//  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
+//  res.status(401).json({ error: 'unauthorized' });
+// });
 
 // ===== Cifrado helpers
 const encToken = (plain) => encryptWithKey(plain, ENC_KEY).value;
