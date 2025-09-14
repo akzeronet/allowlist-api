@@ -5,20 +5,29 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # 🔐 seguridad
+      # 🔐 Seguridad
       API_KEY: "pon-aqui-una-clave-larga-y-aleatoria"
-      API_KEY_OLD: ""       # opcional (rotación)
-      ENC_KEY: ""           # openssl rand -hex 32  (ACTIVA cifrado)
-      ENC_KEY_OLD: ""       # opcional (rotación de cifrado)
-      # 🌐 CORS: separa por comas si quieres restringir (https://tu-n8n.com,https://otro.origen.com)
+      API_KEY_OLD: ""         # opcional (rotación)
+      ENC_KEY: ""             # openssl rand -hex 32  (ACTIVA cifrado)
+      ENC_KEY_OLD: ""         # opcional (rotación de cifrado)
+
+      # 🌐 CORS: separa por comas si quieres restringir
+      # ejemplo: https://n8n.mi.com,https://otro.origen.com
       CORS_ORIGINS: ""
+
       # 🛃 Validación por dominio (opcional), ej: empresa.com
       VALIDATE_DOMAIN: ""
-      # 🕒
+
+      # 🕒 DB + Zona horaria
       DB_PATH: "/app/data/data.db"
       TZ: "America/Santo_Domingo"
-      # Modo: 1=production, 2=development (o usa NODE_ENV directo si prefieres)
+
+      # ⚙️ Modo: 1=production, 2=development
       APP_MODE: "1"
+
+      # 📖 Documentación API
+      DOCS_ENABLED: "true"
+      DOCS_RELAX: "true"      # en dev=true; en prod=false recomendado
     volumes:
       - ./data:/app/data
     restart: unless-stopped
