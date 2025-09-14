@@ -1,7 +1,15 @@
 openapi: 3.0.3
 info:
   title: Allowlist API
-  version: "1.2.0"
+  version: "1.2.1"
+  description: |
+    API de allowlist para validar y gestionar credenciales por dominio/usuario.
+
+    ## Autenticación soportada
+    - **API Key** vía encabezado `X-API-Key`
+    - **HMAC** vía encabezado `X-Signature` (+ `X-Timestamp` y `X-Content-Hash`)
+
+    Por configuración del servidor puedes habilitar uno u otro, o ambos.
 
 servers:
   - url: /
@@ -16,6 +24,11 @@ tags:
     description: "System endpoints"
   - name: entries
   - name: validate
+
+# A nivel global, acepta **una** de las dos (OR):
+security:
+  - ApiKeyAuth: []
+  - HmacAuth: []
 
 paths:
   /health:
@@ -46,8 +59,9 @@ paths:
         - in: query
           name: offset
           schema: { type: integer, default: 0 }
-      security:
-        - ApiKeyAuth: []
+        # Headers auxiliares (solo cuando usas HMAC)
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '200':
           description: OK
@@ -62,8 +76,9 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateEntry'
-      security:
-        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '201': { description: Created }
         '400': { description: Missing fields }
@@ -78,8 +93,8 @@ paths:
           name: id
           required: true
           schema: { type: integer }
-      security:
-        - ApiKeyAuth: []
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '200': { description: OK }
         '404': { description: Not found }
@@ -93,14 +108,14 @@ paths:
           name: id
           required: true
           schema: { type: integer }
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       requestBody:
         required: false
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/UpdateEntry'
-      security:
-        - ApiKeyAuth: []
       responses:
         '200': { description: Updated }
         '404': { description: Not found }
@@ -114,8 +129,8 @@ paths:
           name: id
           required: true
           schema: { type: integer }
-      security:
-        - ApiKeyAuth: []
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '200': { description: Deleted }
 
@@ -136,8 +151,8 @@ paths:
         - in: query
           name: mm_uid
           schema: { type: string }
-      security:
-        - ApiKeyAuth: []
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '200': { description: OK }
         '404': { description: Not found }
@@ -154,8 +169,9 @@ paths:
             schema:
               type: array
               items: { $ref: '#/components/schemas/CreateEntry' }
-      security:
-        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '207': { description: Multi-status summary }
 
@@ -174,8 +190,8 @@ paths:
         - in: query
           name: mm_uid
           schema: { type: string }
-      security:
-        - ApiKeyAuth: []
+        - $ref: '#/components/parameters/XTimestamp'
+        - $ref: '#/components/parameters/XContentHash'
       responses:
         '200': { description: OK }
 
@@ -185,6 +201,54 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
+      description: "Clave de API. Úsala si el servidor tiene API_KEY/OLD configuradas."
+
+    HmacAuth:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: |
+        **HMAC (firma por petición)** usando secreto compartido (`HMAC_SECRET` en el servidor).
+
+        ### Encabezados requeridos cuando usas HMAC
+        - `X-Signature`: hash HMAC-SHA256 del **mensaje canónico** (ver abajo)
+        - `X-Timestamp`: epoch (ms) de la petición
+        - `X-Content-Hash`: SHA-256 hex del body **raw** (vacío = hash de cadena vacía)
+
+        ### Mensaje canónico (ejemplo)
+        ```
+        {method}\n
+        {path_with_query}\n
+        {x-timestamp}\n
+        {x-content-hash}
+        ```
+
+        Donde:
+        - `method` = VERB en mayúsculas (GET/POST/PUT/DELETE)
+        - `path_with_query` = la ruta **exacta** con query string (ej: `/entries?limit=10&offset=0`)
+        - `x-timestamp` = valor exacto del header `X-Timestamp`
+        - `x-content-hash` = SHA-256 del cuerpo **sin modificar** (hex minúsculas)
+
+        Luego: `X-Signature = hex( HMAC_SHA256( secret, canonical_message ) )`.
+
+        El servidor validará:
+        - Ventana de tiempo (por ejemplo ±5 min)
+        - Integridad del cuerpo (X-Content-Hash)
+        - HMAC correcto con el secreto
+
+  parameters:
+    XTimestamp:
+      name: X-Timestamp
+      in: header
+      required: false
+      schema: { type: string }
+      description: "Requerido si usas HMAC. Epoch (ms) de la petición."
+    XContentHash:
+      name: X-Content-Hash
+      in: header
+      required: false
+      schema: { type: string }
+      description: "Requerido si usas HMAC. SHA-256 del body raw en hexadecimal."
 
   schemas:
     Entry:
