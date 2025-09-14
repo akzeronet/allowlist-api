@@ -31,18 +31,23 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 // ====== Middlewares base ======
-app.use(helmet());
+//app.use(helmet());
+
+// Helmet solo para rutas NO-docs
+const helmetBase = helmet(); // tus defaults
+const DOCS_RE = /^\/(?:docs(?:\/.*)?|redoc|openapi\.json)$/;
+
+app.use((req, res, next) => {
+  if (DOCS_RE.test(req.path || '')) return next(); // ❌ no aplicar helmet aquí
+  return helmetBase(req, res, next);               // ✅ helmet en el resto
+});
 
 // TEMPORAL
 // --- Headers relajados para documentación ---
+// Headers relajados (CSP/COOP) para docs/redoc
 const relaxDocsHeaders = (req, res, next) => {
-  // Quita CSP que puso helmet global
-  res.removeHeader('Content-Security-Policy');
-
-  // Permite scripts/CSS de Swagger UI (local) y Redoc (CDN)
-  // - Swagger UI sirve sus JS/CSS desde /docs => 'self' alcanza
-  // - Redoc viene desde https://cdn.redoc.ly
   const isRedoc = req.path === '/redoc';
+
   const csp = [
     "default-src 'self'",
     "base-uri 'self'",
@@ -50,26 +55,20 @@ const relaxDocsHeaders = (req, res, next) => {
     "img-src 'self' data:",
     "font-src 'self' https: data:",
     "style-src 'self' https: 'unsafe-inline'",
+    // Swagger UI (scripts locales) y Redoc (CDN)
     isRedoc
       ? "script-src 'self' https://cdn.redoc.ly 'unsafe-inline' 'unsafe-eval'"
-      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // swagger-ui bundle local
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   ].join('; ');
-  res.setHeader('Content-Security-Policy', csp);
 
-  // Evita warning por COOP en HTTP (PWD)
+  res.setHeader('Content-Security-Policy', csp);
+  // Evita warnings por HTTP y aislamiento en PWD
   res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
 
-  // Favicon opcional para evitar 404 en /favicon.ico
-  res.setHeader('X-Docs', 'true');
   next();
 };
-
-
-
-
-
 
 // CORS estricto (si no configuras, permite todo como antes)
 app.use(cors({
@@ -136,6 +135,39 @@ app.use((req, res, next) => {
 //  if (k === API_KEY || (API_KEY_OLD && k === API_KEY_OLD)) return next();
 //  return res.status(401).json({ error: 'unauthorized' });
 //});
+// Swagger UI (/docs) y OpenAPI JSON
+// (1) Cargar openapi.yaml (si falla, sirve fallback JSON)
+let openapiDoc = null;
+try {
+  const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
+  openapiDoc = YAML.parse(fs.readFileSync(openapiPath, 'utf8'));
+} catch (e) {
+  console.warn('[openapi] no se pudo cargar openapi.yaml:', e.message);
+}
+
+// (2) Rutas públicas de docs/redoc/openapi con headers relajados (SIN helmet)
+if (openapiDoc) {
+  app.get('/openapi.json', relaxDocsHeaders, (_req, res) => res.json(openapiDoc));
+  app.use('/docs', relaxDocsHeaders, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+    explorer: true,
+    swaggerOptions: { persistAuthorization: true },
+  }));
+} else {
+  app.get('/openapi.json', relaxDocsHeaders, (_req, res) =>
+    res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } })
+  );
+}
+app.get('/redoc', relaxDocsHeaders, (_req, res) => {
+  const url = '/openapi.json';
+  res.type('html').send(`<!doctype html>
+<html>
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
+<body>
+  <redoc spec-url="${url}"></redoc>
+  <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
+</body></html>`);
+});
 
 // Auth por API key + rotación (salta health, openapi y docs/redoc + assets)
 const PUBLIC_RE = /^\/(?:health|openapi\.json|redoc|docs(?:\/.*)?|favicon\.ico)$/;
@@ -197,8 +229,8 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // });
 
 // cambios xD
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+//const __filename = fileURLToPath(import.meta.url);
+//const __dirname = path.dirname(__filename);
 
 // Carga openapi.yaml una vez al arrancar
 // const openapiPath = path.join(__dirname, '..', 'openapi.yaml');
@@ -220,34 +252,6 @@ const helmetDocs = helmet({
   crossOriginOpenerPolicy: false,
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 });
-
-// Swagger UI (/docs) y OpenAPI JSON
-if (openapiDoc) {
-  app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
-  app.use('/docs', relaxDocsHeaders, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
-    explorer: true,
-    swaggerOptions: { persistAuthorization: true },
-  }));
-} else {
-  app.get('/openapi.json', (_req, res) => res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } }));
-}
-
-// Redoc (/redoc) usando CDN
-app.get('/redoc', relaxDocsHeaders, (_req, res) => {
-  const url = '/openapi.json';
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
-<body>
-  <redoc spec-url="${url}"></redoc>
-  <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
-</body></html>`);
-});
-
-// Favicon para evitar error de consola
-app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Sirve JSON para integraciones
 //app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
