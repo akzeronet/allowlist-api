@@ -33,6 +33,44 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
 // ====== Middlewares base ======
 app.use(helmet());
 
+// TEMPORAL
+// --- Headers relajados para documentación ---
+const relaxDocsHeaders = (req, res, next) => {
+  // Quita CSP que puso helmet global
+  res.removeHeader('Content-Security-Policy');
+
+  // Permite scripts/CSS de Swagger UI (local) y Redoc (CDN)
+  // - Swagger UI sirve sus JS/CSS desde /docs => 'self' alcanza
+  // - Redoc viene desde https://cdn.redoc.ly
+  const isRedoc = req.path === '/redoc';
+  const csp = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "img-src 'self' data:",
+    "font-src 'self' https: data:",
+    "style-src 'self' https: 'unsafe-inline'",
+    isRedoc
+      ? "script-src 'self' https://cdn.redoc.ly 'unsafe-inline' 'unsafe-eval'"
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // swagger-ui bundle local
+  ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
+
+  // Evita warning por COOP en HTTP (PWD)
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+
+  // Favicon opcional para evitar 404 en /favicon.ico
+  res.setHeader('X-Docs', 'true');
+  next();
+};
+
+
+
+
+
+
 // CORS estricto (si no configuras, permite todo como antes)
 app.use(cors({
   origin: (origin, cb) => {
@@ -183,40 +221,33 @@ const helmetDocs = helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 });
 
-// /openapi.json (si hay spec real)
+// Swagger UI (/docs) y OpenAPI JSON
 if (openapiDoc) {
   app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
-  // Swagger UI en /docs
-  app.use('/docs', helmetDocs, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+  app.use('/docs', relaxDocsHeaders, swaggerUi.serve, swaggerUi.setup(openapiDoc, {
     explorer: true,
     swaggerOptions: { persistAuthorization: true },
   }));
 } else {
-  // Fallback mínimo para no dejar en blanco
-  app.get('/openapi.json', (_req, res) => {
-    res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } });
-  });
+  app.get('/openapi.json', (_req, res) => res.json({ openapi: '3.0.3', info: { title: 'Allowlist API', version: '1.2.0' } }));
 }
 
-// Redoc en /redoc (usa CDN → necesita helmet relajado)
-app.get('/redoc', helmetDocs, (_req, res) => {
+// Redoc (/redoc) usando CDN
+app.get('/redoc', relaxDocsHeaders, (_req, res) => {
   const url = '/openapi.json';
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`<!DOCTYPE html>
 <html>
-<head>
-  <title>Allowlist API - Redoc</title>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>body{margin:0;padding:0}</style>
-</head>
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Allowlist API - Redoc</title><style>html,body{height:100%;margin:0}</style></head>
 <body>
   <redoc spec-url="${url}"></redoc>
   <script src="https://cdn.redoc.ly/redoc/stable/bundles/redoc.standalone.js"></script>
-</body>
-</html>`);
+</body></html>`);
 });
 
+// Favicon para evitar error de consola
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Sirve JSON para integraciones
 //app.get('/openapi.json', (_req, res) => res.json(openapiDoc));
