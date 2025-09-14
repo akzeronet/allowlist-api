@@ -2,30 +2,20 @@ openapi: 3.0.3
 info:
   title: Allowlist API
   version: "1.2.1"
-  description: |
-    API de allowlist para validar y gestionar credenciales por dominio/usuario.
-
-    ## Autenticación soportada
-    - **API Key** vía encabezado `X-API-Key`
-    - **HMAC** vía encabezado `X-Signature` (+ `X-Timestamp` y `X-Content-Hash`)
-
-    Por configuración del servidor puedes habilitar uno u otro, o ambos.
 
 servers:
   - url: /
-    description: "Relative (same host)"
+    description: Relative (same host)
   - url: "http://localhost:8080"
-    description: "Local"
+    description: Local
   - url: "https://api.mi-dominio.com"
-    description: "Prod"
+    description: Prod
 
 tags:
   - name: system
-    description: "System endpoints"
   - name: entries
   - name: validate
 
-# A nivel global, acepta **una** de las dos (OR):
 security:
   - ApiKeyAuth: []
   - HmacAuth: []
@@ -36,7 +26,7 @@ paths:
       summary: Health check
       tags: [system]
       responses:
-        '200':
+        "200":
           description: OK
 
   /entries:
@@ -59,30 +49,26 @@ paths:
         - in: query
           name: offset
           schema: { type: integer, default: 0 }
-        # Headers auxiliares (solo cuando usas HMAC)
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '200':
-          description: OK
+        "200": { description: OK }
 
     post:
       summary: Create entry
-      description: Crea un registro. Devuelve **409** si `username`, `email` o `mm_uid` ya existen.
       tags: [entries]
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/CreateEntry'
+            schema: { $ref: '#/components/schemas/CreateEntry' }
       parameters:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '201': { description: Created }
-        '400': { description: Missing fields }
-        '409': { description: Conflict (username/email/mm_uid already exist) }
+        "201": { description: Created }
+        "400": { description: Missing fields }
+        "409": { description: Conflict }
 
   /entries/{id}:
     get:
@@ -96,12 +82,11 @@ paths:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '200': { description: OK }
-        '404': { description: Not found }
+        "200": { description: OK }
+        "404": { description: Not found }
 
     put:
       summary: Update entry by id
-      description: Actualiza un registro existente. Devuelve **409** si intenta usar `username/email/mm_uid` que ya existen en otro registro.
       tags: [entries]
       parameters:
         - in: path
@@ -114,12 +99,11 @@ paths:
         required: false
         content:
           application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateEntry'
+            schema: { $ref: '#/components/schemas/UpdateEntry' }
       responses:
-        '200': { description: Updated }
-        '404': { description: Not found }
-        '409': { description: Conflict }
+        "200": { description: Updated }
+        "404": { description: Not found }
+        "409": { description: Conflict }
 
     delete:
       summary: Delete entry by id
@@ -132,7 +116,7 @@ paths:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '200': { description: Deleted }
+        "200": { description: Deleted }
 
   /entries/lookup:
     get:
@@ -154,13 +138,12 @@ paths:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '200': { description: OK }
-        '404': { description: Not found }
+        "200": { description: OK }
+        "404": { description: Not found }
 
   /entries/bulk:
     post:
-      summary: Bulk create (create-only por item)
-      description: Intenta crear cada item. Los conflictos por `username/email/mm_uid` se devuelven por item.
+      summary: Bulk create (create-only per item)
       tags: [entries]
       requestBody:
         required: true
@@ -173,12 +156,11 @@ paths:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '207': { description: Multi-status summary }
+        "207": { description: Multi-status summary }
 
   /validate:
     get:
       summary: Validate entry
-      description: Valida por `email` **o** `username` **o** `mm_uid`. Solo válido si `active = true`.
       tags: [validate]
       parameters:
         - in: query
@@ -193,7 +175,7 @@ paths:
         - $ref: '#/components/parameters/XTimestamp'
         - $ref: '#/components/parameters/XContentHash'
       responses:
-        '200': { description: OK }
+        "200": { description: OK }
 
 components:
   securitySchemes:
@@ -201,40 +183,10 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
-      description: "Clave de API. Úsala si el servidor tiene API_KEY/OLD configuradas."
-
     HmacAuth:
       type: apiKey
       in: header
       name: X-Signature
-      description: |
-        **HMAC (firma por petición)** usando secreto compartido (`HMAC_SECRET` en el servidor).
-
-        ### Encabezados requeridos cuando usas HMAC
-        - `X-Signature`: hash HMAC-SHA256 del **mensaje canónico** (ver abajo)
-        - `X-Timestamp`: epoch (ms) de la petición
-        - `X-Content-Hash`: SHA-256 hex del body **raw** (vacío = hash de cadena vacía)
-
-        ### Mensaje canónico (ejemplo)
-        ```
-        {method}\n
-        {path_with_query}\n
-        {x-timestamp}\n
-        {x-content-hash}
-        ```
-
-        Donde:
-        - `method` = VERB en mayúsculas (GET/POST/PUT/DELETE)
-        - `path_with_query` = la ruta **exacta** con query string (ej: `/entries?limit=10&offset=0`)
-        - `x-timestamp` = valor exacto del header `X-Timestamp`
-        - `x-content-hash` = SHA-256 del cuerpo **sin modificar** (hex minúsculas)
-
-        Luego: `X-Signature = hex( HMAC_SHA256( secret, canonical_message ) )`.
-
-        El servidor validará:
-        - Ventana de tiempo (por ejemplo ±5 min)
-        - Integridad del cuerpo (X-Content-Hash)
-        - HMAC correcto con el secreto
 
   parameters:
     XTimestamp:
@@ -242,13 +194,11 @@ components:
       in: header
       required: false
       schema: { type: string }
-      description: "Requerido si usas HMAC. Epoch (ms) de la petición."
     XContentHash:
       name: X-Content-Hash
       in: header
       required: false
       schema: { type: string }
-      description: "Requerido si usas HMAC. SHA-256 del body raw en hexadecimal."
 
   schemas:
     Entry:
@@ -258,9 +208,9 @@ components:
         username:  { type: string }
         email:     { type: string, format: email }
         panelUrl:  { type: string, format: uri }
-        token:     { type: string, description: "Devuelto en claro; guardado cifrado si ENC_KEY está configurada" }
+        token:     { type: string }
         active:    { type: boolean }
-        mm_uid:    { type: string, nullable: true, description: "UNIQUE; múltiples NULL permitidos" }
+        mm_uid:    { type: string, nullable: true }
         createdAt: { type: string }
         updatedAt: { type: string }
 
