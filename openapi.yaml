@@ -1,12 +1,22 @@
 openapi: 3.0.3
 info:
   title: Allowlist API
-  version: 1.2.0
+  version: "1.2.0"
+
 servers:
   - url: /
+    description: "Relative (same host)"
+  - url: "http://localhost:8080"
+    description: "Local"
+  - url: "https://api.mi-dominio.com"
+    description: "Prod"
+
 tags:
+  - name: system
+    description: "System endpoints"
   - name: entries
   - name: validate
+
 paths:
   /health:
     get:
@@ -55,12 +65,9 @@ paths:
       security:
         - ApiKeyAuth: []
       responses:
-        '201':
-          description: Created
-        '400':
-          description: Missing fields
-        '409':
-          description: Conflict (username/email/mm_uid already exist)
+        '201': { description: Created }
+        '400': { description: Missing fields }
+        '409': { description: Conflict (username/email/mm_uid already exist) }
 
   /entries/{id}:
     get:
@@ -155,7 +162,7 @@ paths:
   /validate:
     get:
       summary: Validate entry
-      description: Valida por `email` **o** `username` **o** `mm_uid`. Solo válido si `active = true`.  
+      description: Valida por `email` **o** `username` **o** `mm_uid`. Solo válido si `active = true`.
       tags: [validate]
       parameters:
         - in: query
